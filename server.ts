@@ -27,7 +27,7 @@ async function startServer() {
 
 
   // ─── Image Generation ───────────────────────────────────────────
-  const HF_API_KEY = process.env.HUGGINGFACE_API_KEY || "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";
+  const HF_API_KEY = process.env.HUGGINGFACE_API_KEY || "";
 
   async function fetchWithRetry(url: string, options: any = {}, retries = 3, backoff = 1500): Promise<Response> {
     for (let i = 0; i < retries; i++) {
