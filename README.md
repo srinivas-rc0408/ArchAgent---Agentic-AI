@@ -15,7 +15,7 @@
 
 ---
 
-## 📋 Table of Contents
+## 📋 Table of Contents:
 
 - [Overview](#-overview)
 - [Key Features](#-key-features)
@@ -32,7 +32,7 @@
 
 ---
 
-## 🧠 Overview
+## 🧠 Overview:
 
 **Arch Agent** is a full-stack, AI-native architectural design platform built for professional architects, interior designers, and real estate developers. It acts as an **Autonomous Design Partner** — not just a chatbot — capable of multi-step reasoning, photorealistic image generation, real-time cost estimation, and 3D model synthesis.
 
@@ -40,7 +40,7 @@ The platform leverages **Google Gemini** for intelligent design consultation, **
 
 ---
 
-## ✨ Key Features
+## ✨ Key Features:
 
 | Feature | Description |
 |---|---|
@@ -55,7 +55,7 @@ The platform leverages **Google Gemini** for intelligent design consultation, **
 
 ---
 
-## 🏗️ Architecture
+## 🏗️ Architecture:-
 
 ```
 ┌─────────────────────────────────────────────────────────┐
@@ -87,7 +87,7 @@ The platform leverages **Google Gemini** for intelligent design consultation, **
 
 ---
 
-## 🛠️ Tech Stack
+## 🛠️ Tech Stack:
 
 ### Frontend
 | Technology | Purpose |
