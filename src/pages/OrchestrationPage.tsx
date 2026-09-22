@@ -1,6 +1,15 @@
-import { useState, useEffect, useRef, type MouseEvent, memo } from "react";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  lazy,
+  memo,
+  Suspense,
+  type MouseEvent,
+} from "react";
 import { useNavigate, useLocation } from "react-router-dom";
-import Viewer3D from "@/components/Viewer3D";
 import { ErrorBoundary } from "@/components/ErrorBoundary";
 import {
   Plus,
@@ -19,183 +28,151 @@ import {
   Bot,
   IndianRupee,
   Share2,
-  Mail,
   MessageCircle,
   Palette,
   PanelLeftOpen,
   PanelLeftClose,
-  Menu,
   ChevronRight,
   X,
   Maximize,
   Box,
-  TrendingUp,
 } from "lucide-react";
-import { generateProjectPDF } from "@/services/pdfService";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { ScrollArea } from "@/components/ui/scroll-area";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Separator } from "@/components/ui/separator";
-import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
+import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { motion, AnimatePresence } from "motion/react";
 import {
   getArchitectStream,
   getCostEstimation,
-  generateDesignImage,
   generateMultipleDesignImages,
   generateProjectTitle,
   enhancePrompt,
-  type CostBreakdown,
+  type ImageSize,
 } from "@/lib/gemini";
-import { generateProfessionalPDF } from "@/lib/pdfHelper";
 import { cn } from "@/lib/utils";
+import { safeRequest } from "@/lib/safeRequest";
 import { useLoading } from "@/lib/LoadingContext";
+import { useAuth, signOut } from "@/lib/useAuth";
+import {
+  createSession,
+  loadLocal,
+  loadRemote,
+  saveLocal,
+  syncRemote,
+  type Message,
+  type ProjectSession,
+} from "@/lib/sessionStore";
 import { Logo } from "@/components/Logo";
-import { Progress } from "@/components/ui/interfaces-progress";
-import SilkBackground from "@/components/ui/silk-background-animation";
 import { STYLE_PRESETS, type StylePreset, type DesignConcept } from "@/types";
 import Markdown from "react-markdown";
+import ChatGPTInput from "@/components/ui/prompt-input-dynamic-grow";
+import { LoadingBreadcrumb } from "@/components/ui/animated-loading-svg-text-shimmer";
+
+// three.js + drei + postprocessing is ~1 MB. Only pull it when someone
+// actually opens the immersive viewer.
+const Viewer3D = lazy(() => import("@/components/Viewer3D"));
 
 function ProgressiveImage({ src, alt, className }: { src: string; alt: string; className?: string }) {
-  const [loaded, setLoaded] = useState(false);
+  const [state, setState] = useState<"loading" | "loaded" | "error">("loading");
+
+  // Reset when the source changes, otherwise a regenerated variant inherits
+  // the previous image's loaded/failed state.
+  useEffect(() => setState("loading"), [src]);
+
+  if (state === "error") {
+    return (
+      <div
+        className={cn(
+          "relative overflow-hidden bg-[#141414] flex flex-col items-center justify-center gap-3 text-center px-4",
+          className,
+        )}
+      >
+        <ImageIcon className="h-7 w-7 text-white/20" />
+        <span className="text-[9px] font-bold uppercase tracking-[0.2em] text-white/35">
+          Render unavailable
+        </span>
+      </div>
+    );
+  }
+
   return (
     <div className={cn("relative overflow-hidden bg-[#1A1A1A]", className)}>
-      {!loaded && <div className="absolute inset-0 animate-pulse bg-white/5" />}
+      {state === "loading" && <div className="absolute inset-0 animate-pulse bg-white/5" />}
       <img
         src={src}
         alt={alt}
-        onLoad={() => setLoaded(true)}
+        decoding="async"
+        onLoad={() => setState("loaded")}
+        // Without this a provider hiccup leaves a skeleton pulsing forever,
+        // with no way for the user to tell it from a slow render.
+        onError={() => setState("error")}
         className={cn(
           "w-full h-full object-cover transition-all duration-700 ease-out",
-          loaded ? "opacity-100 blur-none scale-100" : "opacity-0 blur-xl scale-105",
-          className
+          state === "loaded" ? "opacity-100 blur-none scale-100" : "opacity-0 blur-xl scale-105",
+          className,
         )}
-        referrerPolicy="no-referrer"
       />
     </div>
   );
 }
 
-export async function safeRequest<T>(
-  action: () => Promise<T>,
-  onRetry?: (attempt: number) => void,
-  maxRetries = 2
-): Promise<T> {
-  let attempt = 0;
-  while (attempt <= maxRetries) {
-    try {
-      return await action();
-    } catch (error: any) {
-      if (attempt < maxRetries) {
-        attempt++;
-        if (onRetry) onRetry(attempt);
-        await new Promise((resolve) => setTimeout(resolve, 1500 * attempt));
-        continue;
-      }
-      throw error;
-    }
-  }
-  throw new Error("safeRequest failed.");
-}
 
-interface Message {
-  role: "user" | "model";
-  parts: { text: string }[];
-}
-
-interface ProjectSession {
-  id: string;
-  title: string;
-  messages: Message[];
-  designPrompt: string | null;
-  designImage: string | null;
-  designImages: string[]; // Multiple generated variants
-  design3DModel: string | null; // URL to the generated GLB
-  costBreakdown: null | CostBreakdown;
-  timestamp: number;
-}
-
-import ChatGPTInput from "../components/ui/prompt-input-dynamic-grow";
-import { LoadingBreadcrumb } from "../components/ui/animated-loading-svg-text-shimmer";
-import confetti from "canvas-confetti";
-
-const playSuccessSound = () => {
-  try {
-    const audioCtx = new (
-      window.AudioContext || (window as any).webkitAudioContext
-    )();
-
-    // Create oscillator
-    const oscillator = audioCtx.createOscillator();
-    const gainNode = audioCtx.createGain();
-
-    oscillator.connect(gainNode);
-    gainNode.connect(audioCtx.destination);
-
-    // Set properties for a pleasant bright "ding"
-    oscillator.type = "sine";
-    oscillator.frequency.setValueAtTime(523.25, audioCtx.currentTime); // C5
-    oscillator.frequency.exponentialRampToValueAtTime(
-      1046.5,
-      audioCtx.currentTime + 0.1,
-    ); // Slide up to C6
-
-    gainNode.gain.setValueAtTime(0, audioCtx.currentTime);
-    gainNode.gain.linearRampToValueAtTime(0.3, audioCtx.currentTime + 0.05);
-    gainNode.gain.exponentialRampToValueAtTime(
-      0.001,
-      audioCtx.currentTime + 0.5,
-    );
-
-    oscillator.start(audioCtx.currentTime);
-    oscillator.stop(audioCtx.currentTime + 0.5);
-  } catch (error) {
-    console.error("Audio API not supported or blocked", error);
-  }
-};
-
-const triggerSuccessFeedback = () => {
-  // Play subtle satisfying completion ping
-  playSuccessSound();
-
-  // Fire delightful low-key confetti burst from bottom center
+// Feedback effects are a nice-to-have; confetti is ~7 KB and only needed
+// on a successful render, so it loads on demand.
+const fireConfetti = async () => {
+  const { default: confetti } = await import("canvas-confetti");
   confetti({
-    particleCount: 80,
+    particleCount: 70,
     spread: 70,
     origin: { y: 0.9 },
+    disableForReducedMotion: true,
     colors: ["#ffffff", "#aaaaaa", "#555555"],
   });
 };
 
-const ArchAgentLogo = () => (
-  <svg
-    viewBox="0 0 24 24"
-    fill="none"
-    xmlns="http://www.w3.org/2000/svg"
-    className="h-full w-full p-2 text-white"
-  >
-    <path
-      d="M12 2C7.02944 2 3 6.02944 3 11C3 15.9706 7.02944 20 12 20C16.9706 20 21 15.9706 21 11C21 6.02944 16.9706 2 12 2Z"
-      stroke="currentColor"
-      strokeWidth="2"
-      strokeLinecap="round"
-      strokeLinejoin="round"
-    />
-    <circle
-      cx="12"
-      cy="11"
-      r="4"
-      fill="currentColor"
-      fillOpacity="0.2"
-      stroke="currentColor"
-      strokeWidth="1.5"
-      strokeLinecap="round"
-      strokeLinejoin="round"
-    />
-    <circle cx="12" cy="11" r="1.5" fill="currentColor" />
-  </svg>
-);
+
+// One shared AudioContext. The previous version constructed a new one per
+// success ping; Chrome caps a page at ~6, so the sound silently stopped
+// working after the sixth render and leaked every context.
+let audioCtx: AudioContext | null = null;
+
+const playSuccessSound = () => {
+  try {
+    const Ctor = window.AudioContext || (window as any).webkitAudioContext;
+    if (!Ctor) return;
+    audioCtx ??= new Ctor();
+    if (audioCtx.state === "suspended") void audioCtx.resume();
+
+    const now = audioCtx.currentTime;
+    const oscillator = audioCtx.createOscillator();
+    const gainNode = audioCtx.createGain();
+    oscillator.connect(gainNode);
+    gainNode.connect(audioCtx.destination);
+
+    oscillator.type = "sine";
+    oscillator.frequency.setValueAtTime(523.25, now); // C5
+    oscillator.frequency.exponentialRampToValueAtTime(1046.5, now + 0.1); // → C6
+
+    gainNode.gain.setValueAtTime(0.0001, now);
+    gainNode.gain.linearRampToValueAtTime(0.22, now + 0.05);
+    gainNode.gain.exponentialRampToValueAtTime(0.0001, now + 0.5);
+
+    oscillator.start(now);
+    oscillator.stop(now + 0.5);
+    oscillator.onended = () => {
+      oscillator.disconnect();
+      gainNode.disconnect();
+    };
+  } catch {
+    /* audio blocked by autoplay policy — not worth surfacing */
+  }
+};
+
+const triggerSuccessFeedback = () => {
+  playSuccessSound();
+  void fireConfetti();
+};
 
 const StatusBadge = memo(
   ({
@@ -280,6 +257,75 @@ const UserProfileLogo = () => (
   </svg>
 );
 
+/**
+ * One chat row. Memoised because the streaming cursor updates state on every
+ * token — without this, a 20-turn conversation re-parsed 20 markdown trees
+ * per token and the whole panel juddered.
+ */
+const ChatMessage = memo(
+  ({
+    msg,
+    msgId,
+    copiedId,
+    onCopy,
+  }: {
+    msg: Message;
+    msgId: string;
+    copiedId: string | null;
+    onCopy: (id: string, text: string) => void;
+  }) => {
+    const text = msg.parts[0]?.text ?? "";
+    const isUser = msg.role === "user";
+
+    return (
+      <motion.div
+        initial={{ opacity: 0, y: 12 }}
+        animate={{ opacity: 1, y: 0 }}
+        transition={{ duration: 0.32, ease: [0.16, 1, 0.3, 1] }}
+        className={cn(
+          "flex gap-4 relative z-10 max-w-3xl flex-row",
+          isUser ? "ml-auto flex-row-reverse" : "mr-auto",
+        )}
+      >
+        <div
+          className={cn(
+            "text-[10px] font-bold font-jetbrains-mono uppercase tracking-widest pt-1 shrink-0 w-14",
+            isUser ? "text-white/40 text-right pr-1" : "text-white/60",
+          )}
+        >
+          [{isUser ? "USER" : "AGENT"}]
+        </div>
+        <div
+          className={cn(
+            "group p-0 text-[14px] leading-relaxed relative min-w-[200px] bg-transparent text-white border-l border-white/10 pl-6 font-sans",
+            isUser ? "font-normal text-white/90 whitespace-pre-wrap" : "font-light tracking-wide",
+          )}
+        >
+          {isUser ? (
+            text
+          ) : (
+            <div className="prose prose-invert prose-sm max-w-none prose-headings:font-jetbrains-mono prose-headings:text-white prose-headings:uppercase prose-headings:tracking-widest prose-headings:text-xs prose-table:text-xs">
+              <Markdown>{text}</Markdown>
+            </div>
+          )}
+          <button
+            onClick={() => onCopy(msgId, text)}
+            title="Copy message"
+            className="absolute bottom-0 -right-12 opacity-0 group-hover:opacity-100 focus-visible:opacity-100 transition-opacity p-2 rounded-xl backdrop-blur-md border border-white/10 hover:border-white/30 text-white/50 hover:text-white bg-black/40"
+          >
+            {copiedId === msgId ? (
+              <Check className="h-3.5 w-3.5" />
+            ) : (
+              <Copy className="h-3.5 w-3.5" />
+            )}
+          </button>
+        </div>
+      </motion.div>
+    );
+  },
+);
+ChatMessage.displayName = "ChatMessage";
+
 const ProjectTab = memo(
   ({
     id,
@@ -333,40 +379,20 @@ const ProjectTab = memo(
   ),
 );
 
-import { supabase } from "@/lib/supabase";
-
 function OrchestrationPage() {
   const navigate = useNavigate();
   const location = useLocation();
-  const [activeTab, setActiveTab] = useState<"chat" | "cost" | "visual">(
-    "chat",
-  );
+  const { isSyncing, startSyncSequence } = useLoading();
+  const { user, ready: authReady } = useAuth();
+
+  const [activeTab, setActiveTab] = useState<"chat" | "cost" | "visual">("chat");
   const [hasNewEstimation, setHasNewEstimation] = useState(false);
   const [hasNewVisualization, setHasNewVisualization] = useState(false);
 
-  useEffect(() => {
-    if (activeTab === "cost") setHasNewEstimation(false);
-    if (activeTab === "visual") setHasNewVisualization(false);
-  }, [activeTab]);
   const [sessions, setSessions] = useState<ProjectSession[]>([]);
   const [currentSessionId, setCurrentSessionId] = useState<string | null>(null);
-  const [user, setUser] = useState<any>(null);
+  const [isInitializing, setIsInitializing] = useState(true);
 
-  useEffect(() => {
-    supabase.auth.getUser().then(({ data: { user } }) => {
-      if (user) {
-        setUser(user);
-      } else if (localStorage.getItem("auth_token") === "mock") {
-        setUser({ email: "srinivasrc0408@gmail.com", displayName: "Srinivas" });
-      } else {
-        // Not authenticated, redirect to login
-        navigate("/login?redirect=/orchestration");
-      }
-    });
-
-    // HF Warmup
-    fetch("/api/warmup-hf", { method: "POST" }).catch(() => {});
-  }, [navigate]);
   const [isProcessing, setIsProcessing] = useState(false);
   const [retryToast, setRetryToast] = useState<string | null>(null);
   const [retryAction, setRetryAction] = useState<{ label: string; action: () => void } | null>(null);
@@ -375,97 +401,133 @@ function OrchestrationPage() {
   const [isLoading, setIsLoading] = useState(false);
   const [isGeneratingImage, setIsGeneratingImage] = useState(false);
   const [isEstimatingCost, setIsEstimatingCost] = useState(false);
+  const [isGenerating3D, setIsGenerating3D] = useState(false);
+  const [isGeneratingPdf, setIsGeneratingPdf] = useState(false);
   const [costInput, setCostInput] = useState("");
   const [streamingText, setStreamingText] = useState<string | null>(null);
-  const [imageSize, setImageSize] = useState<"1K" | "2K" | "4K">("1K");
+  const [imageSize, setImageSize] = useState<ImageSize>("1K");
   const [copied, setCopied] = useState(false);
+  const [copiedId, setCopiedId] = useState<string | null>(null);
   const [editingSessionId, setEditingSessionId] = useState<string | null>(null);
   const [editingTitle, setEditingTitle] = useState("");
-  const [isInitializing, setIsInitializing] = useState(true);
-  const inputRef = useRef<HTMLTextAreaElement>(null);
-  const scrollRef = useRef<HTMLDivElement>(null);
-  const [copiedId, setCopiedId] = useState<string | null>(null);
   const [selectedImage, setSelectedImage] = useState<string | null>(null);
-  const [selectedStyle, setSelectedStyle] = useState<StylePreset>(
-    STYLE_PRESETS[0],
-  );
+  const [selectedStyle, setSelectedStyle] = useState<StylePreset>(STYLE_PRESETS[0]);
   const [showImmersiveViewer, setShowImmersiveViewer] = useState(false);
   const [isSidebarOpen, setIsSidebarOpen] = useState(false);
   const [isInspectorOpen, setIsInspectorOpen] = useState(false);
-  const [immersiveConcept, setImmersiveConcept] =
-    useState<DesignConcept | null>(null);
+  const [immersiveConcept, setImmersiveConcept] = useState<DesignConcept | null>(null);
 
-  const { isSyncing, startSyncSequence } = useLoading();
+  const inputRef = useRef<HTMLTextAreaElement>(null);
+  const scrollRef = useRef<HTMLDivElement>(null);
+  // Abort every in-flight request when the page unmounts so a background
+  // stream can't call setState on a dead component.
+  const abortRef = useRef<AbortController | null>(null);
 
-  // Sticky flag to suppress internal loader if we mounted during a global sync
-  const [mountedDuringSync] = useState(isSyncing);
+  const currentSession = useMemo(
+    () => sessions.find((s) => s.id === currentSessionId) ?? null,
+    [sessions, currentSessionId],
+  );
 
-  // Hide initialization overlay if we're already syncing globally OR if we started with one
-  const showInitializingOverlay = isInitializing && !isSyncing && !mountedDuringSync;
+  const updateSession = useCallback((id: string, updates: Partial<ProjectSession>) => {
+    setSessions((prev) => prev.map((s) => (s.id === id ? { ...s, ...updates } : s)));
+  }, []);
 
-  const [isGeneratingPDF, setIsGeneratingPDF] = useState(false);
-
-  const handleDownloadPDF = async () => {
-    const session = sessions.find(s => s.id === currentSessionId);
-    if (!session || !session.costBreakdown || session.designImages.length < 3) return;
-    
-    setIsGeneratingPDF(true);
-    try {
-      await generateProjectPDF({
-        projectName: session.title,
-        prompt: session.designPrompt || "Architectural Synthesis",
-        estimation: session.costBreakdown.items.map(item => ({
-          category: item.category,
-          spec: `${item.material} - ${item.specification}`,
-          qty: item.quantity,
-          rate: item.unitPrice,
-          total: item.total
-        })),
-        images: session.designImages.slice(0, 4)
-      });
-    } catch (e) {
-      console.error("PDF generation failed:", e);
-    } finally {
-      setIsGeneratingPDF(false);
-    }
-  };
-
-  const handleBack = () => {
-    startSyncSequence("/");
-  };
-
-  // Handle auto-triggers from showcase or other pages
+  // ── Auth guard ────────────────────────────────────────────────────
+  // Wait for `authReady`; redirecting while auth is still resolving bounced
+  // signed-in users straight back to /login on a slow connection.
   useEffect(() => {
-    if (location.state?.autoTrigger === "estimate" && location.state?.prompt && sessions.length > 0) {
-      const targetSessionId = currentSessionId || sessions[0].id;
-      const p = location.state.prompt;
-      setInput(p);
-      
-      // Navigate to cost tab first for better UX
-      setActiveTab("cost");
-      
-      // Small delay to ensure state has settled
-      setTimeout(() => {
-        handleEstimateCost(p, undefined, targetSessionId);
-      }, 500);
-      
-      // Clear location state to prevent re-triggering on refresh
-      window.history.replaceState({}, document.title);
-    }
-  }, [location.state, sessions, currentSessionId]);
+    if (authReady && !user) navigate("/login?redirect=/orchestration", { replace: true });
+  }, [authReady, user, navigate]);
 
-  // Sync current session ID if it gets lost
   useEffect(() => {
-    if (!currentSessionId && sessions.length > 0) {
-      setCurrentSessionId(sessions[0].id);
-    }
+    if (activeTab === "cost") setHasNewEstimation(false);
+    if (activeTab === "visual") setHasNewVisualization(false);
+    if (activeTab === "chat") inputRef.current?.focus();
+  }, [activeTab]);
+
+  useEffect(
+    () => () => {
+      abortRef.current?.abort();
+    },
+    [],
+  );
+
+  // ── Load sessions once ────────────────────────────────────────────
+  useEffect(() => {
+    let active = true;
+
+    (async () => {
+      let loaded = await loadRemote();
+      if (loaded.length === 0) loaded = loadLocal();
+      if (!active) return;
+
+      if (loaded.length > 0) {
+        setSessions(loaded);
+        setCurrentSessionId(loaded[0].id);
+      } else {
+        const fresh = createSession();
+        setSessions([fresh]);
+        setCurrentSessionId(fresh.id);
+      }
+      setIsInitializing(false);
+    })();
+
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  // ── Persist sessions (debounced) ──────────────────────────────────
+  // The old version serialised every session to localStorage *and*
+  // re-upserted all of them to Supabase on every state change — including
+  // once per streamed token. Both now run at most once per idle 700ms.
+  const syncFingerprints = useRef(new Map<string, string>());
+  useEffect(() => {
+    if (isInitializing || sessions.length === 0) return;
+    const t = window.setTimeout(() => {
+      saveLocal(sessions);
+      void syncRemote(sessions, syncFingerprints.current);
+    }, 700);
+    return () => window.clearTimeout(t);
+  }, [sessions, isInitializing]);
+
+  // Keep a valid selection if the active session is deleted.
+  useEffect(() => {
+    if (!currentSessionId && sessions.length > 0) setCurrentSessionId(sessions[0].id);
   }, [sessions, currentSessionId]);
 
+  // ── Chat autoscroll ───────────────────────────────────────────────
+  // Smooth scrolling restarted on every token, so the container never
+  // settled and the whole chat juddered. Stream with instant jumps; save the
+  // smooth animation for completed turns.
+  const messageCount = currentSession?.messages.length ?? 0;
   useEffect(() => {
-    if (activeTab === "chat" && inputRef.current) {
-      inputRef.current.focus();
-    }
-  }, [activeTab]);
+    const el = scrollRef.current;
+    if (!el) return;
+    el.scrollTo({
+      top: el.scrollHeight,
+      behavior: streamingText !== null ? "auto" : "smooth",
+    });
+  }, [messageCount, streamingText, currentSessionId, activeTab]);
+
+  const createNewSession = useCallback(() => {
+    const fresh = createSession();
+    setSessions((prev) => [fresh, ...prev]);
+    setCurrentSessionId(fresh.id);
+    setActiveTab("chat");
+  }, []);
+
+  const deleteSession = useCallback(
+    (id: string, e: MouseEvent) => {
+      e.stopPropagation();
+      setSessions((prev) => {
+        const filtered = prev.filter((s) => s.id !== id);
+        if (currentSessionId === id) setCurrentSessionId(filtered[0]?.id ?? null);
+        return filtered;
+      });
+    },
+    [currentSessionId],
+  );
 
   const startRename = (session: ProjectSession) => {
     setEditingSessionId(session.id);
@@ -473,410 +535,243 @@ function OrchestrationPage() {
   };
 
   const finishRename = (session: ProjectSession) => {
-    updateSession(session.id, { title: editingTitle });
+    const next = editingTitle.trim();
+    if (next) updateSession(session.id, { title: next });
     setEditingSessionId(null);
   };
 
-  // Function to sync sessions with Supabase
-  const syncWithSupabase = async (sessionsToSync: ProjectSession[]) => {
-    if (!supabase) return;
+  // ── Cost estimation ───────────────────────────────────────────────
+  const handleEstimateCost = useCallback(
+    async (prompt: string, constraints?: string, overrideSessionId?: string) => {
+      const targetSessionId = overrideSessionId ?? currentSessionId;
+      if (!targetSessionId || !prompt?.trim()) return;
 
-    try {
-      // For simplicity in this demo, we'll store all sessions as a single record or multiple.
-      // Ideally, each session is a row. Let's try to upsert them.
-      for (const session of sessionsToSync) {
-        try {
-          const { error } = await supabase.from("project_sessions").upsert({
-            id: session.id,
-            title: session.title,
-            messages: session.messages,
-            design_prompt: session.designPrompt,
-            design_image: session.designImage,
-            design_images: session.designImages,
-            // design_3d_model: session.design3DModel, // Disabled until column is added to Supabase
-            cost_breakdown: session.costBreakdown,
-            timestamp: session.timestamp,
-          });
-
-          if (error) {
-            if (error.code === "42P01") {
-              console.warn("Supabase table 'project_sessions' not found. Falling back to local storage.");
-              break;
-            }
-            // Quiet network errors
-            if (error.message?.includes("Failed to fetch") || error.message?.includes("TypeError")) {
-               console.warn("Supabase network issue. Syncing to local only.");
-            } else {
-               console.error("Supabase sync error:", error.message);
-            }
-          }
-        } catch (itemError) {
-          // Catch fetch errors per item
-          if (itemError instanceof TypeError && itemError.message === 'Failed to fetch') {
-            console.warn("Supabase unreachable. Continuing with local storage.");
-            return; // Stop trying for now if network is failing
-          }
-          throw itemError;
-        }
+      // Already costed and no new constraints? Just reveal the existing result.
+      const existing = sessions.find((s) => s.id === targetSessionId);
+      if (existing?.costBreakdown && !constraints && !overrideSessionId) {
+        setActiveTab("cost");
+        return;
       }
-    } catch (e) {
-      if (e instanceof TypeError && e.message === 'Failed to fetch') {
-        console.warn("Supabase connection issues. Working offline.");
-      } else {
-        console.error("Supabase communication failed", e);
-      }
-    }
-  };
 
-  // Load sessions from Supabase and localStorage
-  useEffect(() => {
-    const loadSessions = async () => {
+      setIsProcessing(true);
+      setIsEstimatingCost(true);
+      setRetryToast(null);
+      setRetryAction(null);
+
       try {
-        let savedSessions: ProjectSession[] = [];
-
-        // Try Supabase first
-        if (import.meta.env.VITE_SUPABASE_URL) {
-          try {
-            const { data, error } = await supabase
-              .from("project_sessions")
-              .select("*")
-              .order("timestamp", { ascending: false });
-
-            if (!error && data && data.length > 0) {
-              savedSessions = data.map((s) => ({
-                id: s.id,
-                title: s.title,
-                messages: s.messages,
-                designPrompt: s.design_prompt,
-                designImage: s.design_image,
-                designImages: s.design_images || [],
-                design3DModel: null, // Keep the structure
-                costBreakdown: s.cost_breakdown,
-                timestamp: s.timestamp,
-              }));
-              console.log("Loaded sessions from Supabase");
-            } else if (error) {
-              // Ignore table not found error as it's expected if migration hasn't run
-              if (error.code !== "42P01") {
-                console.warn("Supabase fetch failed, trying local storage:", error.message);
-              }
-            }
-          } catch (fetchErr) {
-            if (fetchErr instanceof TypeError && fetchErr.message === 'Failed to fetch') {
-              console.warn("Supabase unreachable. Falling back to local storage.");
-            } else {
-              console.error("Supabase load error:", fetchErr);
-            }
-          }
-        }
-
-        // If Supabase empty or failed, try localStorage
-        if (savedSessions.length === 0) {
-          const saved = localStorage.getItem("arch_agent_sessions");
-          if (saved) {
-            const parsed = JSON.parse(saved);
-            if (Array.isArray(parsed) && parsed.length > 0) {
-              savedSessions = parsed.map((s: any) => ({
-                ...s,
-                designImages:
-                  s.designImages || (s.designImage ? [s.designImage] : []),
-              }));
-              console.log("Loaded sessions from localStorage");
-            }
-          }
-        }
-
-        if (savedSessions.length > 0) {
-          setSessions(savedSessions);
-          setCurrentSessionId(savedSessions[0].id);
-        } else {
-          createNewSession();
-        }
-      } catch (err) {
-        console.error("Session initialization failed", err);
-        createNewSession();
-      } finally {
-        setIsInitializing(false);
-      }
-    };
-
-    loadSessions();
-  }, []);
-
-  // Save sessions to localStorage and sync with Supabase
-  useEffect(() => {
-    if (sessions.length > 0 && !isInitializing) {
-      localStorage.setItem("arch_agent_sessions", JSON.stringify(sessions));
-      // Debounced sync or immediate for critical changes
-      syncWithSupabase(sessions);
-    }
-  }, [sessions, isInitializing]);
-
-  // Scroll to bottom of chat
-  useEffect(() => {
-    if (scrollRef.current) {
-      const scrollContainer = scrollRef.current;
-      // Scroll to bottom with a slight delay to ensure content is measured
-      const timeoutId = setTimeout(() => {
-        scrollContainer.scrollTo({
-          top: scrollContainer.scrollHeight,
-          behavior: "smooth",
+        const breakdown = await safeRequest(
+          () => getCostEstimation(prompt, constraints, abortRef.current?.signal),
+          (attempt) => setRetryToast(`Re-synchronizing market data… (attempt ${attempt})`),
+        );
+        updateSession(targetSessionId, { costBreakdown: breakdown });
+        setHasNewEstimation((prev) => (activeTab === "cost" ? prev : true));
+        triggerSuccessFeedback();
+      } catch (error) {
+        console.error("[Cost]", error);
+        setRetryAction({
+          label: "Market analysis failed",
+          action: () => void handleEstimateCost(prompt, constraints, overrideSessionId),
         });
-      }, 100);
-      return () => clearTimeout(timeoutId);
-    }
-  }, [sessions, currentSessionId, streamingText, activeTab]);
-
-  const currentSession = sessions.find((s) => s.id === currentSessionId);
-
-  const createNewSession = () => {
-    const newSession: ProjectSession = {
-      id: Math.random().toString(36).substring(7),
-      title: "New Project",
-      messages: [],
-      designPrompt: null,
-      designImage: null,
-      designImages: [],
-      design3DModel: null,
-      costBreakdown: null,
-      timestamp: Date.now(),
-    };
-    setSessions((prev) => [newSession, ...prev]);
-    setCurrentSessionId(newSession.id);
-  };
-
-  const deleteSession = (id: string, e: MouseEvent) => {
-    e.stopPropagation();
-    setSessions((prev) => {
-      const filtered = prev.filter((s) => s.id !== id);
-      if (currentSessionId === id) {
-        setCurrentSessionId(filtered.length > 0 ? filtered[0].id : null);
+      } finally {
+        setIsEstimatingCost(false);
+        setIsProcessing(false);
+        setRetryToast(null);
       }
-      return filtered;
-    });
-  };
+    },
+    [currentSessionId, sessions, activeTab, updateSession],
+  );
 
-  const handleSend = async (overrideMessage?: string) => {
-    const textToSend = overrideMessage || input;
-    if (!textToSend.trim() || isLoading) return;
+  // ── Visual synthesis ──────────────────────────────────────────────
+  const handleGenerateDesign = useCallback(
+    async (prompt: string, overrideSessionId?: string, force = false) => {
+      const targetSessionId = overrideSessionId ?? currentSessionId;
+      if (!targetSessionId || !prompt?.trim()) return;
 
-    let targetSessionId = currentSessionId;
+      const existing = sessions.find((s) => s.id === targetSessionId);
+      // Already rendered? Reveal what's there — unless the user explicitly
+      // asked to regenerate. Without the `force` flag, "Regenerate
+      // Collection" just switched tabs and produced nothing.
+      if (existing?.designImages.length && !overrideSessionId && !force) {
+        setActiveTab("visual");
+        return;
+      }
 
-    // If no active session, create a new one instantly before proceeding
-    if (!targetSessionId) {
-      const newSession: ProjectSession = {
-        id: Math.random().toString(36).substring(7),
-        title: "New Project",
-        messages: [],
-        designPrompt: null,
-        designImage: null,
-        designImages: [],
-        design3DModel: null,
-        costBreakdown: null,
-        timestamp: Date.now(),
-      };
-      setSessions((prev) => [newSession, ...prev]);
-      setCurrentSessionId(newSession.id);
-      targetSessionId = newSession.id;
-    }
+      setIsProcessing(true);
+      setIsGeneratingImage(true);
+      setIsSidebarOpen(false);
+      setRetryToast(null);
+      setRetryAction(null);
+      // Clear first so progressively-revealed variants replace the old set
+      // instead of appending to it.
+      updateSession(targetSessionId, { designImages: [], designImage: null });
 
-    const currentSessionRef = sessions.find((s) => s.id === targetSessionId);
+      // Costing runs alongside rendering rather than behind it.
+      void handleEstimateCost(prompt, undefined, targetSessionId);
 
-    const userMessage: Message = {
-      role: "user",
-      parts: [{ text: textToSend }],
-    };
-    const baseMessages = currentSessionRef ? currentSessionRef.messages : [];
-    const updatedMessages = [...baseMessages, userMessage];
+      try {
+        const finalPrompt = (await enhancePrompt(prompt, selectedStyle.keywords)).trim() || prompt;
 
-    // Auto-hide sidebar when interacting with chat
-    setIsSidebarOpen(false);
+        const images = await safeRequest(
+          () =>
+            generateMultipleDesignImages(
+              finalPrompt,
+              4,
+              imageSize,
+              abortRef.current?.signal,
+              // Show each render the moment it lands rather than holding the
+              // whole grid hostage to the slowest variant.
+              (url) =>
+                setSessions((prev) =>
+                  prev.map((sess) =>
+                    sess.id === targetSessionId
+                      ? {
+                          ...sess,
+                          designImages: [...sess.designImages, url],
+                          designImage: sess.designImage ?? url,
+                        }
+                      : sess,
+                  ),
+                ),
+            ),
+          (attempt) => setRetryToast(`Neural link interrupted — retrying… (attempt ${attempt})`),
+        );
 
-    // Update local state immediately
-    updateSession(targetSessionId, { messages: updatedMessages });
-    setInput("");
-    setIsLoading(true);
+        updateSession(targetSessionId, { designImages: images, designImage: images[0] });
+        setHasNewVisualization((prev) => (activeTab === "visual" ? prev : true));
+        triggerSuccessFeedback();
+      } catch (error) {
+        console.error("[Visual]", error);
+        setRetryAction({
+          label: "Visual synthesis failed",
+          action: () => void handleGenerateDesign(prompt, overrideSessionId, true),
+        });
+      } finally {
+        setIsGeneratingImage(false);
+        setIsProcessing(false);
+        setRetryToast(null);
+      }
+    },
+    [currentSessionId, sessions, selectedStyle, imageSize, activeTab, updateSession, handleEstimateCost],
+  );
 
-    try {
-      const stream = await getArchitectStream(updatedMessages);
-      let fullResponse = "";
+  // ── Chat ──────────────────────────────────────────────────────────
+  const handleSend = useCallback(
+    async (overrideMessage?: string) => {
+      const textToSend = (overrideMessage ?? input).trim();
+      if (!textToSend || isLoading) return;
+
+      let targetSessionId = currentSessionId;
+      let baseMessages: Message[] = [];
+
+      if (!targetSessionId) {
+        const fresh = createSession();
+        setSessions((prev) => [fresh, ...prev]);
+        setCurrentSessionId(fresh.id);
+        targetSessionId = fresh.id;
+      } else {
+        baseMessages = sessions.find((s) => s.id === targetSessionId)?.messages ?? [];
+      }
+
+      const previousTitle = sessions.find((s) => s.id === targetSessionId)?.title ?? "New Project";
+      const updatedMessages: Message[] = [
+        ...baseMessages,
+        { role: "user", parts: [{ text: textToSend }] },
+      ];
+
+      setIsSidebarOpen(false);
+      updateSession(targetSessionId, { messages: updatedMessages });
+      setInput("");
+      setIsLoading(true);
       setStreamingText("");
 
-      for await (const chunk of stream) {
-        const chunkText = chunk.text || "";
-        fullResponse += chunkText;
-        setStreamingText(fullResponse);
-      }
+      abortRef.current?.abort();
+      abortRef.current = new AbortController();
 
-      setStreamingText(null);
-
-      // Extract design prompt if present
-      const promptMatch = fullResponse.match(
-        /\[DESIGN_PROMPT\](.*?)\[\/DESIGN_PROMPT\]/s,
-      );
-      const designPrompt = promptMatch ? promptMatch[1].trim() : null;
-      const cleanResponse = fullResponse
-        .replace(/\[DESIGN_PROMPT\].*?\[\/DESIGN_PROMPT\]/gs, "")
-        .trim();
-
-      const finalModelMessage: Message = {
-        role: "model",
-        parts: [
-          {
-            text:
-              cleanResponse ||
-              (designPrompt
-                ? "I've generated a design prompt for you. Visualizing now..."
-                : "I'm here to help with your architectural needs."),
-          },
-        ],
-      };
-      const finalMessages = [...updatedMessages, finalModelMessage];
-
-      updateSession(targetSessionId, {
-        messages: finalMessages,
-        designPrompt:
-          designPrompt ||
-          (currentSessionRef ? currentSessionRef.designPrompt : null),
-      });
-
-      // Smart Title Generation if it's the first few messages
-      if (
-        finalMessages.length >= 2 &&
-        (!currentSessionRef || currentSessionRef.title === "New Project")
-      ) {
-        generateProjectTitle(finalMessages).then((title) => {
-          updateSession(targetSessionId, { title });
-        });
-      }
-
-      // AUTO-TRIGGER: If a design prompt was generated, automatically trigger image and cost
-      if (designPrompt) {
-        handleGenerateDesign(designPrompt, targetSessionId);
-      }
-    } catch (error) {
-      console.error(error);
-      const errorMessage: Message = {
-        role: "model",
-        parts: [
-          { text: "I'm sorry, I encountered an error. Please try again." },
-        ],
-      };
-      updateSession(targetSessionId, {
-        messages: [...updatedMessages, errorMessage],
-      });
-    } finally {
-      setIsLoading(false);
-    }
-  };
-
-  const handleGenerateDesign = async (
-    prompt: string,
-    overrideSessionId?: string,
-  ) => {
-    const targetSessionId = overrideSessionId || currentSessionId;
-    if (!targetSessionId || !prompt?.trim()) return;
-
-    // Run-Once Logic
-    const session = sessions.find(s => s.id === targetSessionId);
-    if (session?.designImages && session.designImages.length > 0 && !overrideSessionId) {
-      setActiveTab("visual");
-      return;
-    }
-    
-    if (!user && !user?.email) {
-       navigate("/login");
-       return;
-    }
-
-    setIsProcessing(true);
-    setIsGeneratingImage(true);
-    setIsSidebarOpen(false); // Auto-hide sidebar to focus on canvas
-    setRetryToast(null);
-    setRetryAction(null);
-
-    // AUTO-TRIGGER: Launch cost estimation entirely in parallel so it isn't blocked by image failure
-    handleEstimateCost(prompt, undefined, targetSessionId);
-
-    try {
-      // Enhance the prompt using the selected style preset keywords
-      let enhancedPrompt = prompt;
       try {
-        const result = await enhancePrompt(prompt, selectedStyle.keywords);
-        // Only use enhanced result if it's meaningful
-        if (result && result.trim().length > 0) {
-          enhancedPrompt = result;
-          console.log(
-            `[Style] Enhanced prompt with '${selectedStyle.name}' style`,
+        let fullResponse = "";
+        for await (const chunk of getArchitectStream(updatedMessages, abortRef.current.signal)) {
+          fullResponse += chunk.text;
+          setStreamingText(fullResponse);
+        }
+        setStreamingText(null);
+
+        const promptMatch = fullResponse.match(/\[DESIGN_PROMPT\](.*?)\[\/DESIGN_PROMPT\]/s);
+        const designPrompt = promptMatch ? promptMatch[1].trim() : null;
+        const cleanResponse = fullResponse
+          .replace(/\[DESIGN_PROMPT\].*?\[\/DESIGN_PROMPT\]/gs, "")
+          .trim();
+
+        const finalMessages: Message[] = [
+          ...updatedMessages,
+          {
+            role: "model",
+            parts: [
+              {
+                text:
+                  cleanResponse ||
+                  (designPrompt
+                    ? "Design specification locked. Rendering now…"
+                    : "I'm here to help with your architectural needs."),
+              },
+            ],
+          },
+        ];
+
+        updateSession(targetSessionId, {
+          messages: finalMessages,
+          ...(designPrompt ? { designPrompt } : {}),
+        });
+
+        if (previousTitle === "New Project" && finalMessages.length >= 2) {
+          void generateProjectTitle(finalMessages).then((title) =>
+            updateSession(targetSessionId!, { title }),
           );
         }
-      } catch (err) {
-        console.warn(
-          "[Style] Prompt enhancement failed, using original prompt",
-          err,
-        );
+
+        if (designPrompt) void handleGenerateDesign(designPrompt, targetSessionId);
+      } catch (error) {
+        if ((error as Error)?.name === "AbortError") return;
+        console.error("[Chat]", error);
+        setStreamingText(null);
+        updateSession(targetSessionId, {
+          messages: [
+            ...updatedMessages,
+            {
+              role: "model",
+              parts: [
+                {
+                  text: `I couldn't reach the design engine. ${
+                    (error as Error)?.message ?? "Please try again."
+                  }`,
+                },
+              ],
+            },
+          ],
+        });
+      } finally {
+        setIsLoading(false);
       }
+    },
+    [input, isLoading, currentSessionId, sessions, updateSession, handleGenerateDesign],
+  );
 
-      // Safety: ensure we never pass an empty prompt
-      const finalPrompt = enhancedPrompt?.trim() || prompt;
+  // ── 3D mesh ───────────────────────────────────────────────────────
+  const handleGenerate3D = useCallback(async () => {
+    if (!currentSession?.designPrompt || !currentSession.designImage || !currentSessionId) return;
 
-      // Generate 4 design variants in parallel
-      const images = await safeRequest(
-        () => generateMultipleDesignImages(finalPrompt, 4, imageSize),
-        (attempt) => setRetryToast(`Neural Link Interrupted - Re-synchronizing... (Attempt ${attempt})`)
-      );
-
-      updateSession(targetSessionId, {
-        designImages: images,
-        designImage: images[0],
-      });
-
-      if (activeTab !== "visual") {
-        setHasNewVisualization(true);
-      }
-
-      triggerSuccessFeedback();
-    } catch (error) {
-      console.error(error);
-      setRetryAction({
-        label: "Visual Synthesis Failed",
-        action: () => handleGenerateDesign(prompt, overrideSessionId)
-      });
-      const errorMessage: Message = {
-        role: "model",
-        parts: [{ text: "Architectural synthesis encountered an obstruction. I've attempted to optimize the render parameters, but the cluster is under high load. Please retry or adjust the design prompt." }]
-      };
-      updateSession(targetSessionId, { 
-        messages: [...(sessions.find(s => s.id === targetSessionId)?.messages || []), errorMessage] 
-      });
-    } finally {
-      setIsGeneratingImage(false);
-      setIsProcessing(false);
-      setRetryToast(null);
-    }
-  };
-
-  const [isGenerating3D, setIsGenerating3D] = useState(false);
-  const [isGeneratingPdf, setIsGeneratingPdf] = useState(false);
-
-  const handleGenerate3D = async () => {
-    if (!currentSession?.designPrompt || !currentSession?.designImage) return;
-    
     setImmersiveConcept({
-      id: currentSessionId!,
+      id: currentSessionId,
       url: currentSession.designImage,
       prompt: currentSession.designPrompt,
       style: selectedStyle.name,
-      timestamp: Date.now()
+      timestamp: Date.now(),
     });
     setShowImmersiveViewer(true);
 
-    if (currentSession?.design3DModel) {
-      return; // Run-once logic
-    }
-    
+    if (currentSession.design3DModel) return; // already synthesised
+
     setIsGenerating3D(true);
-    setRetryToast("Initializing Neural Mesh...");
+    setRetryToast("Initializing neural mesh…");
     setRetryAction(null);
 
     try {
@@ -888,128 +783,138 @@ function OrchestrationPage() {
             body: JSON.stringify({
               prompt: currentSession.designPrompt,
               imageUrl: currentSession.designImage,
-              unlit: false,
-              pbr: true,
-              mesh_density: "high",
-              texture_size: 4096,
-              export_format: "glb_compressed"
-            })
+            }),
           });
-          if (!response.ok) throw new Error("3D Generation returned " + response.status);
+          if (!response.ok) {
+            const detail = await response.json().catch(() => ({}));
+            throw new Error(detail.error || `3D generation returned ${response.status}`);
+          }
           return response.json();
         },
-        (attempt) => setRetryToast(`Server Waking Up - Retrying... (Attempt ${attempt})`)
+        (attempt) => setRetryToast(`Waking the render cluster… (attempt ${attempt})`),
       );
 
       if (data.modelUrl) {
-         updateSession(currentSessionId!, { design3DModel: data.modelUrl });
-         triggerSuccessFeedback();
+        updateSession(currentSessionId, { design3DModel: data.modelUrl });
+        triggerSuccessFeedback();
       }
     } catch (err) {
-      console.error("3D Gen Error:", err);
-      setRetryAction({
-        label: "Neural Mesh Generation Failed",
-        action: () => handleGenerate3D()
-      });
+      console.error("[3D]", err);
+      setRetryAction({ label: "Neural mesh generation failed", action: () => void handleGenerate3D() });
     } finally {
       setIsGenerating3D(false);
-    }
-  };
-
-  const handleEnterRoom = (imageUrl: string) => {
-    const concept: DesignConcept = {
-      id: currentSessionId || "viewer",
-      url: imageUrl,
-      prompt: currentSession?.designPrompt || "",
-      style: selectedStyle.name,
-      timestamp: Date.now(),
-    };
-    setImmersiveConcept(concept);
-    setShowImmersiveViewer(true);
-  };
-
-  const handleEstimateCost = async (
-    prompt: string,
-    constraints?: string,
-    overrideSessionId?: string,
-  ) => {
-    const targetSessionId = overrideSessionId || currentSessionId;
-    if (!targetSessionId) return;
-
-    // Run-Once Logic & Auth Guard
-    const session = sessions.find(s => s.id === targetSessionId);
-    if (session?.costBreakdown && !constraints && !overrideSessionId) {
-      setActiveTab("cost");
-      return;
-    }
-
-    if (!user && !user?.email) {
-       navigate("/login");
-       return;
-    }
-
-    setIsProcessing(true);
-    setIsEstimatingCost(true);
-    setRetryToast(null);
-    setRetryAction(null);
-    try {
-      const breakdown = await safeRequest(
-        () => getCostEstimation(prompt, constraints),
-        (attempt) => setRetryToast(`Neural Link Interrupted - Re-synchronizing... (Attempt ${attempt})`)
-      );
-      updateSession(targetSessionId, { costBreakdown: breakdown });
-
-      if (activeTab !== "cost") {
-        setHasNewEstimation(true);
-      }
-
-      setTimeout(triggerSuccessFeedback, 300);
-    } catch (error) {
-      console.error(error);
-      setRetryAction({
-        label: "Market Analysis Failed",
-        action: () => handleEstimateCost(prompt, constraints, overrideSessionId)
-      });
-    } finally {
-      setIsEstimatingCost(false);
-      setIsProcessing(false);
       setRetryToast(null);
     }
-  };
+  }, [currentSession, currentSessionId, selectedStyle, updateSession]);
 
-  const updateSession = (id: string, updates: Partial<ProjectSession>) => {
-    setSessions((prev) =>
-      prev.map((s) => (s.id === id ? { ...s, ...updates } : s)),
-    );
-  };
+  const handleEnterRoom = useCallback(
+    (imageUrl: string) => {
+      setImmersiveConcept({
+        id: currentSessionId ?? "viewer",
+        url: imageUrl,
+        prompt: currentSession?.designPrompt ?? "",
+        style: selectedStyle.name,
+        timestamp: Date.now(),
+      });
+      setShowImmersiveViewer(true);
+    },
+    [currentSessionId, currentSession, selectedStyle],
+  );
 
-  const copyToClipboard = (text: string) => {
-    navigator.clipboard.writeText(text);
+  // ── Export ────────────────────────────────────────────────────────
+  const canExportPDF = !!currentSession?.costBreakdown && (currentSession?.designImages.length ?? 0) > 0;
+
+  const handleDownloadPDF = useCallback(async () => {
+    if (!currentSession?.costBreakdown) return;
+    setIsGeneratingPdf(true);
+    try {
+      // jsPDF + its canvas/DOM shims are ~800 KB. Pull them only when
+      // someone actually exports, not on every workspace load.
+      const { generateProjectPDF } = await import("@/services/pdfService");
+      await generateProjectPDF({
+        projectName: currentSession.title,
+        prompt: currentSession.designPrompt ?? "Architectural Synthesis",
+        estimation: currentSession.costBreakdown.items.map((item) => ({
+          category: item.category,
+          spec: `${item.material} — ${item.specification}`,
+          qty: item.quantity,
+          rate: item.unitPrice,
+          total: item.total,
+        })),
+        images: currentSession.designImages.slice(0, 4),
+      });
+    } catch (e) {
+      console.error("[PDF]", e);
+      setRetryAction({ label: "PDF export failed", action: () => void handleDownloadPDF() });
+    } finally {
+      setIsGeneratingPdf(false);
+    }
+  }, [currentSession]);
+
+  const downloadImage = useCallback(async (url: string) => {
+    try {
+      // Remote renders need a blob hop; a bare <a download> on a cross-origin
+      // URL is ignored by the browser and just navigates away.
+      const href = url.startsWith("data:") ? url : URL.createObjectURL(await (await fetch(url)).blob());
+      const a = document.createElement("a");
+      a.href = href;
+      a.download = `arch-agent-${Date.now()}.png`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      if (!url.startsWith("data:")) URL.revokeObjectURL(href);
+    } catch (e) {
+      console.error("[Download]", e);
+      window.open(url, "_blank", "noopener");
+    }
+  }, []);
+
+  const handleCopyMessage = useCallback((id: string, text: string) => {
+    void navigator.clipboard.writeText(text);
+    setCopiedId(id);
+    window.setTimeout(() => setCopiedId(null), 2000);
+  }, []);
+
+  const copyToClipboard = useCallback((text: string) => {
+    void navigator.clipboard.writeText(text);
     setCopied(true);
-    setTimeout(() => setCopied(false), 2000);
-  };
+    window.setTimeout(() => setCopied(false), 2000);
+  }, []);
 
-  const handleLogout = async () => {
-    startSyncSequence("/"); 
-    // Perform cleanup after transition starts, but before reload kills the animation
-    setTimeout(async () => {
-      try {
-        if (supabase) await supabase.auth.signOut();
-      } catch (err) {
-        console.error("Sign out error:", err);
-      }
-      localStorage.removeItem("auth_token");
-      // Redirect via hard navigation to ensure clean state
-      window.location.href = "/";
-    }, 2800);
-  };
+  const handleBack = useCallback(() => startSyncSequence("/"), [startSyncSequence]);
+
+  const handleLogout = useCallback(async () => {
+    abortRef.current?.abort();
+    await signOut();
+    startSyncSequence("/");
+  }, [startSyncSequence]);
+
+  // ── Deep link from the showcase ("Estimate Cost" on a template) ───
+  const autoTriggeredRef = useRef(false);
+  useEffect(() => {
+    if (autoTriggeredRef.current || isInitializing) return;
+    if (location.state?.autoTrigger !== "estimate" || !location.state?.prompt) return;
+    if (!currentSessionId) return;
+
+    autoTriggeredRef.current = true;
+    setActiveTab("cost");
+    void handleEstimateCost(location.state.prompt, undefined, currentSessionId);
+    window.history.replaceState({}, document.title);
+  }, [location.state, isInitializing, currentSessionId, handleEstimateCost]);
+
+  const showInitializingOverlay = isInitializing && !isSyncing;
 
   return (
     <motion.div
-      initial={{ opacity: 0, filter: "blur(4px)", scale: 0.99 }}
-      animate={{ opacity: 1, filter: "blur(0px)", scale: 1 }}
-      transition={{ duration: 0.8, ease: [0.22, 1, 0.36, 1] }}
-      className="flex h-screen w-full bg-transparent text-white overflow-hidden font-sans relative"
+      initial={{ opacity: 0 }}
+      animate={{ opacity: 1 }}
+      transition={{ duration: 0.3, ease: [0.22, 1, 0.36, 1] }}
+      // The workspace is a reading surface, so it gets its own near-opaque
+      // backdrop. Letting the global photo through at full strength made chat
+      // text and cost tables sit on tree branches. A blur/scale entrance was
+      // also animating a full-viewport filter on every mount — expensive and
+      // the one thing guaranteed to be janky on first paint.
+      className="flex h-screen w-full bg-[#050505]/92 text-white overflow-hidden font-sans relative"
     >
       <AnimatePresence>
         {(retryToast || retryAction) && (
@@ -1146,8 +1051,8 @@ function OrchestrationPage() {
               />
               <StatusBadge
                 endpoint="/api/status"
-                provider="twentyfirst"
-                label="21st"
+                provider="images"
+                label="IMG"
               />
             </div>
 
@@ -1245,14 +1150,13 @@ function OrchestrationPage() {
               <div className="flex flex-col gap-4 p-5 rounded-2xl bg-white/[0.03] border border-white/10 shadow-lg">
                 <div className="flex items-center gap-4">
                   <Avatar className="h-12 w-12 border border-white/20 shadow-xl">
-                    <AvatarImage src="" />
                     <AvatarFallback className="bg-white/5 text-xs font-bold text-white/50">
                       <UserProfileLogo />
                     </AvatarFallback>
                   </Avatar>
                   <div className="flex flex-col">
                     <span className="text-sm font-black tracking-tight text-white">
-                      {user?.displayName || "Srinivas"}
+                      {user?.displayName ?? "Architect"}
                     </span>
                     <span className="text-[10px] text-white/30 font-bold uppercase tracking-widest truncate max-w-[120px]">
                       Architect Lead
@@ -1262,7 +1166,7 @@ function OrchestrationPage() {
                 
                 <div className="pt-4 border-t border-white/5">
                   <p className="text-[9px] text-white/30 font-medium italic leading-relaxed">
-                    Welcome back, Srinivas. Your orchestration environment is active and optimized.
+                    {user?.email ?? "Local session"} — orchestration environment active.
                   </p>
                 </div>
 
@@ -1371,7 +1275,7 @@ function OrchestrationPage() {
                       Sync
                     </span>
                   </div>
-                  {currentSession?.costBreakdown && currentSession?.designImages && currentSession.designImages.length >= 3 && (
+                  {canExportPDF && (
                     <button
                       onClick={handleDownloadPDF}
                       disabled={isProcessing || isGeneratingPdf}
@@ -1448,7 +1352,7 @@ function OrchestrationPage() {
                     </div>
 
                     <div
-                      className="flex-1 min-h-0 h-[calc(100vh-180px)] overflow-y-auto px-4 p-6 scroll-smooth custom-scrollbar"
+                      className="flex-1 min-h-0 overflow-y-auto px-4 p-6 scroll-smooth custom-scrollbar"
                       ref={scrollRef}
                     >
                       <div className="space-y-8 max-w-2xl mx-auto py-10 relative z-10">
@@ -1506,69 +1410,15 @@ function OrchestrationPage() {
                             </motion.div>
                           )}
 
-                          {currentSession.messages.map((msg, i) => {
-                            const msgId = `${i}-${msg.role}`;
-                            return (
-                              <motion.div
-                                key={msgId}
-                                initial={{ opacity: 0, y: 15, scale: 0.98 }}
-                                animate={{ opacity: 1, y: 0, scale: 1 }}
-                                transition={{
-                                  duration: 0.5,
-                                  ease: [0.16, 1, 0.3, 1],
-                                  delay: 0.05
-                                }}
-                                layout
-                                className={cn(
-                                  "flex gap-4 relative z-10 max-w-3xl flex-row",
-                                  msg.role === "user" ? "ml-auto flex-row-reverse" : "mr-auto",
-                                )}
-                              >
-                                <div
-                                  className={cn(
-                                    "text-[10px] font-bold font-jetbrains-mono uppercase tracking-widest pt-1 shrink-0 w-14",
-                                    msg.role === "user"
-                                      ? "text-[#FFFFFF]/40 text-right pr-1"
-                                      : "text-[#FFFFFF]/60",
-                                  )}
-                                >
-                                  [{msg.role === "user" ? "USER" : "AGENT"}]
-                                </div>
-                                <div
-                                  className={cn(
-                                    "group p-0 text-[14px] leading-relaxed relative min-w-[200px] bg-transparent text-white border-l border-white/10 pl-6 font-sans shadow-none whitespace-pre-wrap",
-                                    msg.role === "user"
-                                      ? "font-normal text-white/90"
-                                      : "font-light tracking-wide",
-                                  )}
-                                >
-                                  {msg.role !== "user" ? (
-                                    <div className="prose prose-invert prose-sm max-w-none prose-headings:font-jetbrains-mono prose-headings:text-[#FFFFFF] prose-headings:uppercase prose-headings:tracking-widest prose-headings:text-xs">
-                                      <Markdown>{msg.parts[0].text}</Markdown>
-                                    </div>
-                                  ) : (
-                                    msg.parts[0].text
-                                  )}
-                                  <button
-                                    onClick={() => {
-                                      navigator.clipboard.writeText(
-                                        msg.parts[0].text,
-                                      );
-                                      setCopiedId(msgId);
-                                      setTimeout(() => setCopiedId(null), 2000);
-                                    }}
-                                    className="absolute bottom-0 -right-12 opacity-0 group-hover:opacity-100 transition-all p-2 rounded-xl backdrop-blur-md border border-[#1E1E20] hover:border-white/30 text-white/50 hover:text-white bg-black/40"
-                                  >
-                                    {copiedId === msgId ? (
-                                      <Check className="h-3.5 w-3.5 text-[#FFFFFF]" />
-                                    ) : (
-                                      <Copy className="h-3.5 w-3.5" />
-                                    )}
-                                  </button>
-                                </div>
-                              </motion.div>
-                            );
-                          })}
+                          {currentSession.messages.map((msg, i) => (
+                            <ChatMessage
+                              key={`${i}-${msg.role}`}
+                              msg={msg}
+                              msgId={`${i}-${msg.role}`}
+                              copiedId={copiedId}
+                              onCopy={handleCopyMessage}
+                            />
+                          ))}
 
                           {streamingText && (
                             <motion.div
@@ -1717,7 +1567,7 @@ function OrchestrationPage() {
                       </div>
                     </div>
 
-                    <div className="flex-1 min-h-0 h-[calc(100vh-180px)] overflow-y-auto pb-24 px-4 custom-scrollbar">
+                    <div className="flex-1 min-h-0 overflow-y-auto pb-24 px-4 custom-scrollbar">
                       <div className="px-8 pt-6 max-w-3xl mx-auto w-full relative z-10">
                         <div className="relative group">
                           <Input
@@ -1893,6 +1743,8 @@ function OrchestrationPage() {
                         <Button
                           variant="ghost"
                           size="icon"
+                          title="Download the active render"
+                          onClick={() => downloadImage(currentSession.designImage!)}
                           className="h-10 w-10 text-white/40 hover:text-white hover:bg-white/10 bg-white/5 backdrop-blur-md rounded-xl"
                         >
                           <Download className="h-5 w-5" />
@@ -1900,15 +1752,14 @@ function OrchestrationPage() {
                       )}
                     </div>
 
-                    <div className="flex-1 min-h-0 h-[calc(100vh-180px)] overflow-y-auto pb-24 px-4 custom-scrollbar">
+                    <div className="flex-1 min-h-0 overflow-y-auto pb-24 px-4 custom-scrollbar">
                       {/* ── Style Preset Selector ── */}
                       <div className="px-8 pt-8 pb-10 space-y-4 relative z-10">
-                          <div className="flex items-center gap-2">
-                            <Palette className="h-3.5 w-3.5 text-white/20" />
-                            <label className="text-[10px] uppercase tracking-[0.2em] font-bold text-white/30">
-                              Aesthetic Presets
-                            </label>
-                          </div>
+                        <div className="flex items-center gap-2">
+                          <Palette className="h-3.5 w-3.5 text-white/20" />
+                          <label className="text-[10px] uppercase tracking-[0.2em] font-bold text-white/30">
+                            Aesthetic Presets
+                          </label>
                         </div>
                         <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3">
                           {STYLE_PRESETS.map((style) => (
@@ -1944,6 +1795,7 @@ function OrchestrationPage() {
                             </button>
                           ))}
                         </div>
+                      </div>
 
                       {!currentSession?.designPrompt ? (
                         <div className="flex-1 flex flex-col items-center justify-center text-center space-y-6 relative z-10">
@@ -1969,7 +1821,7 @@ function OrchestrationPage() {
                           </div>
                         </div>
                      ) : (
-                        <div className="flex-1 min-h-0 h-[calc(100vh-180px)] overflow-y-auto p-8 flex flex-col gap-10 max-w-5xl mx-auto w-full relative z-10 custom-scrollbar">
+                        <div className="flex-1 min-h-0 overflow-y-auto p-8 flex flex-col gap-10 max-w-5xl mx-auto w-full relative z-10 custom-scrollbar">
                            <div className="space-y-2">
                             <div className="flex items-center justify-between px-4 mb-4">
                               <div className="flex items-center gap-3">
@@ -2033,7 +1885,7 @@ function OrchestrationPage() {
                               )}
                           </div>
 
-                          {isGeneratingImage && (
+                          {isGeneratingImage && currentSession.designImages.length === 0 && (
                             <div className="flex flex-col items-center justify-center py-20 space-y-6 relative z-10">
                               <div className="relative h-32 w-32 mb-4">
                                 <motion.div
@@ -2065,8 +1917,7 @@ function OrchestrationPage() {
                             </div>
                           )}
 
-                          {!isGeneratingImage &&
-                            currentSession.designImages &&
+                          {currentSession.designImages &&
                             currentSession.designImages.length > 0 && (
                               <div className="shrink-0 space-y-6 relative z-10">
                                 <div className="flex items-center justify-between px-2">
@@ -2083,6 +1934,8 @@ function OrchestrationPage() {
                                     onClick={() =>
                                       handleGenerateDesign(
                                         currentSession.designPrompt!,
+                                        undefined,
+                                        true,
                                       )
                                     }
                                     disabled={isGeneratingImage}
@@ -2456,14 +2309,7 @@ function OrchestrationPage() {
                 </Button>
 
                 <Button
-                  onClick={() => {
-                    const a = document.createElement("a");
-                    a.href = selectedImage;
-                    a.download = `arch-design-${Date.now()}.png`;
-                    document.body.appendChild(a);
-                    a.click();
-                    document.body.removeChild(a);
-                  }}
+                  onClick={() => downloadImage(selectedImage)}
                   className="bg-white text-black hover:bg-white/90 rounded-xl h-12 px-8 gap-2 ml-auto"
                 >
                   <Download className="h-4 w-4" />
@@ -2481,6 +2327,7 @@ function OrchestrationPage() {
       <AnimatePresence>
         {showImmersiveViewer && immersiveConcept && (
           <ErrorBoundary>
+            <Suspense fallback={null}>
             <Viewer3D
               design={immersiveConcept}
               is3D={isGenerating3D || !!currentSession?.design3DModel}
@@ -2490,6 +2337,7 @@ function OrchestrationPage() {
                 setImmersiveConcept(null);
               }}
             />
+            </Suspense>
           </ErrorBoundary>
         )}
       </AnimatePresence>

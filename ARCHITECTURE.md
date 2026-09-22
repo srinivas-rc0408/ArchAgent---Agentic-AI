@@ -20,8 +20,9 @@ Arch Agent is built as a high-performance, full-stack Single Page Application (S
 - **Routing**: Client-side routing via `react-router-dom` v7.
 - **State Management**: 
   - **Local State**: React Hooks (`useState`, `useRef`, `useContext`) for component-level logic.
-  - **Persistence**: `localStorage` is used to maintain project history, user sessions, and generated assets across browser refreshes.
-- **Service Layer**: A dedicated `gemini.ts` service handles all communication with the Google Gemini API, abstracting complex prompt engineering and response parsing.
+  - **Persistence**: `src/lib/sessionStore.ts` debounces writes to `localStorage` and upserts only changed rows to Supabase. Inline base64 renders are stripped before persisting so a session cannot exceed the storage quota.
+- **Service Layer**: `src/lib/gemini.ts` is a thin client over the app's own `/api/*` routes. It holds no credentials.
+- **AI Proxy**: `server.ts` (Express) owns every API key and talks to Gemini, Hugging Face and the image provider on the browser's behalf. Chat is streamed back as Server-Sent Events.
 
 ---
 
@@ -38,7 +39,7 @@ The "Arch Agent" is not just a chatbot; it is an **Autonomous Design Partner** c
 ### Tools & Integration
 - **Gemini API**: The core engine for text generation, JSON parsing, and image creation.
 - **Google Search**: Integrated via Gemini to fetch real-world architectural trends and material pricing data.
-- **Shader Backgrounds**: Custom GLSL shader backgrounds (`AnoAI`) provide a high-tech, immersive atmosphere in the workspace.
+- **Image providers**: Hugging Face `FLUX.1-schnell` when a token is configured, falling back to a keyless provider. Both are streamed through `/api/image` so the browser only ever talks to our own origin.
 
 ### Memory System
 - **Session Memory**: The agent maintains full conversation history within a project session.
@@ -51,7 +52,7 @@ The "Arch Agent" is not just a chatbot; it is an **Autonomous Design Partner** c
 We utilize the **Google Gemini** family of models for their superior speed, multimodal native capabilities, and reliability in structured data output.
 
 ### Primary Models
-1.  **Gemini 2.0 Flash (Text/Logic/Visuals)**
+1.  **Gemini 2.5 Flash (Text/Logic)**
     -   **Usage**: Main architectural chat, title generation, cost estimation, and internal prompt engineering.
     -   **Justification**: 
         -   **Latency**: Extremely low latency ensures "buttery smooth" streaming responses.
@@ -65,3 +66,28 @@ We utilize the **Google Gemini** family of models for their superior speed, mult
 - **Inertial Interactions**: All buttons and hover effects use spring physics rather than linear transitions.
 - **Glassmorphism**: Extensive use of `backdrop-blur` and semi-transparent overlays to create a high-end, modern aesthetic.
 - **Autonomous Triggers**: The agent is programmed to be proactive—automatically triggering image generation and cost analysis when a design is finalized.
+
+
+---
+
+## 5. Security Model
+
+- **No key reaches the browser.** `GEMINI_API_KEY` and `HUGGINGFACE_API_KEY` are read by `server.ts` only. The Vite config deliberately defines no secret, so nothing is inlined into the bundle.
+- **Only `VITE_`-prefixed values are public**, and the only ones used are the Supabase URL and anon key, which are safe to expose while Row Level Security is enabled.
+- **Missing credentials degrade, they don't crash.** Each route answers 503 with an actionable message; the UI surfaces it inline and offers a retry.
+- **No credentials in source.** Copy `env.example` to `.env`; `.env*` is gitignored.
+
+---
+
+## 6. Performance Budget
+
+| Concern | Approach |
+|---|---|
+| Initial bundle | Landing page only. Workspace, login and showcase are `React.lazy` routes. |
+| three.js (~1.3 MB) | Loaded on demand, when the immersive viewer first opens. |
+| jsPDF (~800 KB) | Dynamically imported at export time. |
+| 3D render cost | DPR clamped to 1.75, postprocessing reduced to a single vignette, one environment map. |
+| Chat streaming | Message rows are memoised; autoscroll jumps instantly mid-stream and only animates on completed turns. |
+| Persistence | Debounced 700 ms; only changed sessions sync remotely. |
+| Scrolling | Exactly one Lenis instance, app-wide, with its rAF loop cancelled on unmount. |
+| Motion | Fully respects `prefers-reduced-motion`. |

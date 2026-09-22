@@ -25,6 +25,7 @@ export default forwardRef<SupportChatRef, {}>((_, ref) => {
   const [isLoading, setIsLoading] = useState(false);
   const [isReceiving, setIsReceiving] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
+  const abortRef = useRef<AbortController | null>(null);
 
   useImperativeHandle(ref, () => ({
     openChat: (initialMessage?: string) => {
@@ -35,18 +36,17 @@ export default forwardRef<SupportChatRef, {}>((_, ref) => {
     }
   }));
 
-  const scrollToBottom = () => {
-    if (scrollRef.current) {
-      scrollRef.current.scrollTo({
-        top: scrollRef.current.scrollHeight,
-        behavior: "smooth"
-      });
-    }
-  };
-
+  // Jump instantly while tokens are arriving; a smooth scroll restarted on
+  // every chunk never settles and makes the panel shudder.
   useEffect(() => {
-    scrollToBottom();
+    scrollRef.current?.scrollTo({
+      top: scrollRef.current.scrollHeight,
+      behavior: isReceiving ? "auto" : "smooth",
+    });
   }, [messages, isLoading, isReceiving]);
+
+  // Drop the in-flight stream if the widget closes mid-answer.
+  useEffect(() => () => abortRef.current?.abort(), []);
 
   const handleSend = async () => {
     if (!input.trim() || isLoading || isReceiving) return;
@@ -73,9 +73,11 @@ export default forwardRef<SupportChatRef, {}>((_, ref) => {
       
       // Filter out the initial greeting to ensure history starts with user
       const apiHistory = chatHistory.filter((msg, index) => !(index === 0 && msg.role === "bot"));
-      const stream = await getSupportStream(apiHistory);
-      
-      setIsLoading(false); // Stream started flowing
+      abortRef.current?.abort();
+      abortRef.current = new AbortController();
+      const stream = getSupportStream(apiHistory, abortRef.current.signal);
+
+      setIsLoading(false); // stream is flowing
 
       for await (const chunk of stream) {
         fullText += chunk.text;
@@ -86,10 +88,14 @@ export default forwardRef<SupportChatRef, {}>((_, ref) => {
         });
       }
     } catch (error) {
+      if ((error as Error)?.name === "AbortError") return;
       console.error(error);
       setMessages(prev => {
         const updated = [...prev];
-        updated[updated.length - 1] = { role: "bot", text: "I encountered a communication error with our servers. Please try again." };
+        updated[updated.length - 1] = {
+          role: "bot",
+          text: `I couldn't reach the support engine. ${(error as Error)?.message ?? "Please try again."}`,
+        };
         return updated;
       });
     } finally {

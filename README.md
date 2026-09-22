@@ -124,8 +124,8 @@ The platform leverages **Google Gemini** for intelligent design consultation, **
 
 ### Prerequisites
 
-- **Node.js** ≥ 18.x
-- **npm** ≥ 9.x
+- **Node.js** ≥ 20.x
+- **npm** ≥ 10.x
 - A [Google Gemini API Key](https://ai.google.dev/)
 - *(Optional)* A [Hugging Face API Key](https://huggingface.co/settings/tokens) for image generation
 - *(Optional)* A [Supabase](https://supabase.com/) project for authentication
@@ -141,7 +141,7 @@ cd ArchAgent---Agentic-AI
 npm install
 
 # 3. Configure environment variables
-cp .env.example .env
+cp env.example .env
 # Edit .env and add your API keys (see below)
 
 # 4. Start the development server
@@ -150,28 +150,55 @@ npm run dev
 
 The app will be available at **http://localhost:3000**.
 
-### Build for Production
+It starts without any keys: chat and cost estimation report that a key is
+needed, image generation falls back to a keyless provider, and sign-in runs in
+local mode. Add keys when you want the full pipeline.
+
+### Build for production
 
 ```bash
-npm run build
-npm run preview
+npm run build     # typecheck, then bundle to dist/
+npm start         # serve dist/ from the same Express server
+```
+
+### Other scripts
+
+```bash
+npm run typecheck   # tsc --noEmit
+npm test            # SSE stream reader checks
 ```
 
 ---
 
 ## 🔑 Environment Variables
 
-Create a `.env` file in the root directory (see `.env.example` for reference):
+Copy `env.example` to `.env` and fill in real values. `.env*` is gitignored.
+
+**Server-side — never sent to the browser:**
 
 | Variable | Required | Description |
 |---|---|---|
-| `GEMINI_API_KEY` | ✅ Yes | Google Gemini API key for AI chat, cost estimation, and prompt engineering |
-| `HUGGINGFACE_API_KEY` | ⚡ Recommended | Hugging Face token for FLUX image generation & TRELLIS 3D synthesis |
-| `API_KEY_21ST` | ❌ Optional | 21st.dev integration key |
-| `VITE_SUPABASE_URL` | ❌ Optional | Supabase project URL for authentication |
-| `VITE_SUPABASE_ANON_KEY` | ❌ Optional | Supabase anonymous key |
+| `GEMINI_API_KEY` | ✅ Yes | Powers chat, cost estimation, titles and prompt enhancement |
+| `HUGGINGFACE_API_KEY` | ⚡ Recommended | FLUX.1-schnell image generation and TRELLIS 3D synthesis |
+| `GEMINI_MODEL` | ❌ Optional | Override the chat model (default `gemini-2.5-flash`) |
+| `PORT` | ❌ Optional | Server port (default `3000`) |
 
-> **Note:** The app works without Hugging Face keys — image generation will fall back to the Pollinations API automatically.
+**Client-side — bundled into the browser build, so anon keys only:**
+
+| Variable | Required | Description |
+|---|---|---|
+| `VITE_SUPABASE_URL` | ❌ Optional | Supabase project URL |
+| `VITE_SUPABASE_ANON_KEY` | ❌ Optional | Supabase anon key (safe to expose **only** with RLS enabled) |
+
+> **Security:** every AI credential is held by the Express server and reached
+> through `/api/*`. The Vite config defines no secret, so nothing sensitive is
+> inlined into the bundle. Leave Supabase blank to run in local-only mode —
+> sessions persist to `localStorage`.
+>
+> Without `HUGGINGFACE_API_KEY`, image generation falls back to a keyless
+> provider that rate-limits to roughly one request at a time, so renders arrive
+> one by one over ~30-60s. They stream into the grid as they land rather than
+> waiting for all four.
 
 ---
 
@@ -183,7 +210,7 @@ ArchAgent/
 ├── index.html                 # Entry HTML
 ├── vite.config.ts             # Vite configuration
 ├── package.json               # Dependencies & scripts
-├── .env.example               # Environment variable template
+├── env.example                # Environment variable template
 ├── ARCHITECTURE.md            # Detailed architecture documentation
 │
 ├── src/
@@ -196,8 +223,7 @@ ArchAgent/
 │   │   ├── HomePage.tsx       # Landing page with hero, features, showcase
 │   │   ├── LoginPage.tsx      # Authentication page (Supabase)
 │   │   ├── OrchestrationPage  # Main AI workspace (chat, visualizer, costs)
-│   │   ├── ShowcasePage.tsx   # Project gallery & portfolio
-│   │   └── DemoPage.tsx       # Interactive demo
+│   │   └── ShowcasePage.tsx   # Project gallery & portfolio
 │   │
 │   ├── components/
 │   │   ├── GlobalLayout.tsx   # App shell with navigation & preloader
@@ -206,19 +232,28 @@ ArchAgent/
 │   │   ├── SupportChat.tsx    # AI support chatbot
 │   │   ├── AccountModal.tsx   # User account management
 │   │   ├── ContactDialog.tsx  # Contact form modal
-│   │   ├── Preloader.tsx      # Animated loading screen
-│   │   └── ui/               # Shadcn UI primitives
+│   │   └── ui/                # Shadcn UI primitives
 │   │
 │   ├── lib/
-│   │   ├── gemini.ts          # Gemini AI service (chat, costs, images)
-│   │   ├── supabase.ts        # Supabase client configuration
-│   │   ├── pdfHelper.ts       # PDF report generation
-│   │   ├── LoadingContext.tsx  # Global loading state provider
+│   │   ├── gemini.ts          # Client for /api/* (holds no credentials)
+│   │   ├── sessionStore.ts    # Debounced localStorage + Supabase persistence
+│   │   ├── useAuth.ts         # Single source of truth for sign-in state
+│   │   ├── safeRequest.ts     # Retry-with-backoff helper
+│   │   ├── supabase.ts        # Supabase client (null when unconfigured)
+│   │   ├── LoadingContext.tsx # Route transition state
 │   │   └── utils.ts           # Utility functions
 │   │
-│   └── services/              # Additional service integrations
+│   └── services/
+│       └── pdfService.ts      # PDF report generation (dynamically imported)
+│
+├── server/
+│   └── prompts.ts             # Server-only personas and response schemas
+│
+├── test/
+│   └── stream.test.mjs        # SSE reader checks
 │
 └── public/
+    ├── favicon.svg
     └── showcase/              # Static showcase assets
 ```
 
@@ -241,13 +276,13 @@ Arch Agent operates as an **autonomous multi-agent system** with specialized rol
 
 ### 3. Visualizer & 3D Orchestrator
 - Generates prompts optimized for: *ray-tracing, 8K resolution, volumetric lighting, PBR textures*
-- Multi-variant generation (4 parallel renders with varied lighting styles)
-- Automatic model warm-up for faster inference
+- Multi-variant generation (4 renders with varied lighting styles), revealed progressively as each completes
+- Cost estimation runs alongside rendering rather than behind it
 
 ### LLM Configuration
 | Model | Use Case |
 |---|---|
-| `gemini-3.1-flash-lite` | Chat, cost estimation, title generation, prompt enhancement |
+| `gemini-2.5-flash` | Chat, cost estimation, title generation, prompt enhancement |
 | `FLUX.1-schnell` | High-speed architectural image generation |
 | `TRELLIS` | 3D mesh synthesis from images/prompts |
 
@@ -261,18 +296,27 @@ Arch Agent operates as an **autonomous multi-agent system** with specialized rol
 | `/login` | **LoginPage** | Supabase-powered authentication |
 | `/orchestration` | **OrchestrationPage** | Main AI workspace — chat, image gen, cost analysis, 3D viewer |
 | `/showcase` | **ShowcasePage** | Portfolio gallery of generated designs |
-| `/demo` | **DemoPage** | Interactive platform demo |
+
+Unknown routes redirect to `/`. Login, workspace and showcase are lazy-loaded,
+so the landing page ships without three.js or jsPDF.
 
 ---
 
 ## 📡 API Endpoints
 
+All AI traffic goes through these routes, which hold the credentials.
+
 | Method | Endpoint | Description |
 |---|---|---|
-| `GET` | `/api/status` | Health check — reports configured API keys |
-| `POST` | `/api/generate-image` | Generate architectural visualization (HF → Pollinations fallback) |
-| `POST` | `/api/generate-3d` | Generate 3D mesh via TRELLIS |
-| `POST` | `/api/warmup-hf` | Pre-warm Hugging Face models |
+| `GET` | `/api/status` | Reports which providers are configured |
+| `POST` | `/api/chat` | Architect chat — streamed as Server-Sent Events |
+| `POST` | `/api/support` | Support chat — streamed as Server-Sent Events |
+| `POST` | `/api/title` | Generate a project title from conversation history |
+| `POST` | `/api/enhance` | Enrich a design prompt (falls back to the original on failure) |
+| `POST` | `/api/cost` | Schema-constrained JSON cost breakdown |
+| `POST` | `/api/generate-image` | Request a render (Hugging Face → keyless fallback) |
+| `GET` | `/api/image` | Same-origin image proxy; serialised and retried on rate limits |
+| `POST` | `/api/generate-3d` | 3D mesh synthesis via TRELLIS |
 
 ---
 

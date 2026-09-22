@@ -1,16 +1,9 @@
-import { GoogleGenAI } from "@google/genai";
-
-// ─── AI Operations via @google/genai ────────────────────────────────
-// The API key is handled by the AI Studio environment via process.env.GEMINI_API_KEY
-const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY as string });
-
-export interface DesignConstraints {
-  projectType: string;
-  dimensions?: string;
-  materials?: string[];
-  colorPalette?: string[];
-  style?: string;
-}
+/**
+ * Thin client for the server-side AI proxy.
+ *
+ * No API key ever reaches the browser: every call below hits our own Express
+ * routes, which hold the credentials. See `server.ts`.
+ */
 
 export interface CostItem {
   material: string;
@@ -27,235 +20,181 @@ export interface CostBreakdown {
   currency: string;
 }
 
-const ARCH_AGENT_PERSONA = `
-You are Arch Agent, a premium Neural Architecture Orchestration Center.
-Act as a Senior Lead Architect and Quantity Surveyor from a top-tier international firm.
-Tone: Professional, technical, precise. Avoid fluff.
-Primary Context: You are talking to Srinivas (srinivasrc0408@gmail.com).
-
-[Agent: Technical Design Partner]
-Analyze spatial logic, lighting physics, and material compatibility. Provide outputs in a structured 'Design Specification' format.
-
-[Agent: Cost Estimator (Quantity Surveyor)]
-Protocol: Use real-world pricing data based on the Bengaluru, India market (Luxury/Premium Segment).
-Accuracy Protocol: Material Grade (Premium/Luxury) + Square Footage + Labor Complexity + Current Market Inflation.
-Pricing Benchmarks for Bengaluru (Luxury Segment):
-- Italian Marble: ₹550-1800/sq.ft
-- Premium Teak: ₹7500/cu.ft
-- False Ceiling: ₹140/sq.ft
-- Premium Automation: ₹3.5L+ per zone
-Output Requirement: Always provide a breakdown: Material Costs, Labor, and a 10% 'Precision Buffer'. 
-Present this in a clean table format in chat. 
-Use JetBrains Mono style (Monospace) for all dimensions and cost figures.
-
-[Agent: Visualizer & 3D Orchestrator]
-Translate descriptions into high-fidelity technical prompts.
-Keywords: Ray-tracing, 8k resolution, volumetric lighting, photorealistic textures (Walnut, Brutalist Concrete, Frosted Glass, PBR materials).
-Ensure 3D geometry specs follow CAD-compatible logic.
-`;
-
-const ARCHITECT_SYSTEM_INSTRUCTION = `${ARCH_AGENT_PERSONA}
-
-Your goal is to gather design constraints efficiently and provide a detailed design prompt for image generation.
-
-BE PROACTIVE:
-- If a user mentions a specific design task (e.g., "I want a ceiling design"), do not ask open-ended questions. 
-- Instead, ask for specific, targeted constraints immediately. For a ceiling design, only ask for "Paint Color" and "Room Size/Dimensions".
-
-Once you have enough information, generate a highly detailed, professional design prompt wrapped in [DESIGN_PROMPT] tags.
-Example: [DESIGN_PROMPT]A minimalist modern living room with floor-to-ceiling glass walls, white oak flooring, and a recessed tray ceiling with warm LED strip lighting...[/DESIGN_PROMPT]
-
-Be concise, professional, and technical.`;
-
-/**
- * Streams the architect chat response.
- */
-export async function* getArchitectStream(history: { role: "user" | "model"; parts: { text: string }[] }[]) {
-  try {
-    const stream = await ai.models.generateContentStream({
-      model: "gemini-3.1-flash-lite",
-      contents: history.map(msg => ({
-        role: msg.role === "model" ? "model" : "user",
-        parts: [{ text: msg.parts[0].text || "" }]
-      })),
-      config: {
-        systemInstruction: ARCHITECT_SYSTEM_INSTRUCTION,
-      }
-    });
-
-    for await (const chunk of stream) {
-      if (chunk.text) {
-        yield { text: chunk.text };
-      }
-    }
-  } catch (error: any) {
-    console.error("[AI] Direct Chat error:", error);
-    throw error;
+async function postJSON<T>(url: string, body: unknown, signal?: AbortSignal): Promise<T> {
+  const res = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+    signal,
+  });
+  if (!res.ok) {
+    const detail = await res.json().catch(() => ({}));
+    throw new Error((detail as any).error || `${res.status} ${res.statusText}`);
   }
-}
-
-export async function* getSupportStream(history: { role: "user" | "bot"; text: string }[]) {
-  try {
-    const stream = await ai.models.generateContentStream({
-      model: "gemini-3.1-flash-lite",
-      contents: history.map(msg => ({
-        role: msg.role === "bot" ? "model" : "user",
-        parts: [{ text: msg.text || "" }]
-      })),
-      config: {
-        systemInstruction: "You are the frontline Technical Support AI for Arch Agent, a premium Neural Architecture Orchestration platform. Your job is to help users navigate the software, troubleshoot errors, and explain features like the 3D Visualizer, Cost Estimator, and PDF Export. Keep responses concise, highly professional, and technical. Do not generate architectural designs here—direct users to the 'Assistant' or 'Visualizer' tabs for that. If a user reports a bug, apologize professionally and offer a troubleshooting step (e.g., clearing cache, checking project locks).",
-      }
-    });
-
-    for await (const chunk of stream) {
-      if (chunk.text) {
-        yield { text: chunk.text };
-      }
-    }
-  } catch (error: any) {
-    console.error("[AI] Support Chat error:", error);
-    throw error;
-  }
+  return res.json() as Promise<T>;
 }
 
 /**
- * Generate a concise project title via AI.
+ * Consume a Server-Sent Events stream from one of our chat routes.
+ * Yields incremental text chunks exactly like the old direct-SDK generator did.
  */
-export async function generateProjectTitle(history: { role: "user" | "model"; parts: { text: string }[] }[]) {
-  try {
-    const response = await ai.models.generateContent({
-      model: "gemini-3.1-flash-lite",
-      contents: [
-        ...history.map(msg => ({
-          role: msg.role === "model" ? "model" : "user",
-          parts: [{ text: msg.parts[0].text || "" }]
-        })),
-        { role: "user", parts: [{ text: "Generate a concise, professional project title for this architectural design conversation. Return ONLY the title string." }] }
-      ],
-      config: {
-        systemInstruction: "You are a professional architectural design manager.",
-      }
-    });
+async function* streamSSE(url: string, body: unknown, signal?: AbortSignal) {
+  const res = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+    signal,
+  });
 
-    return response.text?.trim() || "New Project";
-  } catch (error) {
-    console.warn("[AI] Title generation failed:", error);
+  if (!res.ok || !res.body) {
+    const detail = await res.json().catch(() => ({}));
+    throw new Error((detail as any).error || `${res.status} ${res.statusText}`);
+  }
+
+  const reader = res.body.pipeThrough(new TextDecoderStream()).getReader();
+  let buffer = "";
+
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += value;
+
+      // SSE frames are separated by a blank line; keep the trailing partial.
+      const frames = buffer.split("\n\n");
+      buffer = frames.pop() ?? "";
+
+      for (const frame of frames) {
+        const line = frame.trim();
+        if (!line.startsWith("data:")) continue;
+        const payload = line.slice(5).trim();
+        if (payload === "[DONE]") return;
+
+        const parsed = JSON.parse(payload) as { text?: string; error?: string };
+        if (parsed.error) throw new Error(parsed.error);
+        if (parsed.text) yield { text: parsed.text };
+      }
+    }
+  } finally {
+    reader.cancel().catch(() => {});
+  }
+}
+
+export function getArchitectStream(
+  history: { role: "user" | "model"; parts: { text: string }[] }[],
+  signal?: AbortSignal,
+) {
+  return streamSSE(
+    "/api/chat",
+    { history: history.map((m) => ({ role: m.role, text: m.parts[0]?.text ?? "" })) },
+    signal,
+  );
+}
+
+export function getSupportStream(
+  history: { role: "user" | "bot"; text: string }[],
+  signal?: AbortSignal,
+) {
+  return streamSSE(
+    "/api/support",
+    { history: history.map((m) => ({ role: m.role === "bot" ? "model" : "user", text: m.text })) },
+    signal,
+  );
+}
+
+export async function generateProjectTitle(
+  history: { role: "user" | "model"; parts: { text: string }[] }[],
+): Promise<string> {
+  try {
+    const { title } = await postJSON<{ title: string }>("/api/title", {
+      history: history.map((m) => ({ role: m.role, text: m.parts[0]?.text ?? "" })),
+    });
+    return title || "New Project";
+  } catch {
     return "New Project";
   }
 }
 
-/**
- * Get cost estimation via AI.
- */
-export async function getCostEstimation(designPrompt: string, userConstraints?: string): Promise<CostBreakdown> {
-  const prompt = `Based on this architectural design prompt and optional user constraints, provide a structured financial breakdown specifically for the Bengaluru, India market.
-          
-Design Prompt: "${designPrompt}"
-${userConstraints ? `User Constraints/Budget: "${userConstraints}"` : ""}
+export function getCostEstimation(
+  designPrompt: string,
+  userConstraints?: string,
+  signal?: AbortSignal,
+): Promise<CostBreakdown> {
+  return postJSON<CostBreakdown>("/api/cost", { prompt: designPrompt, constraints: userConstraints }, signal);
+}
 
-Accuracy Protocol (Bengaluru May 2026):
-1. Use real-world pricing data for Bengaluru (Premium/Luxury Market).
-2. Formula: Material Grade + Square Footage + Labor Complexity + Current Market Inflation.
-3. Include a 10% 'Precision Buffer' as a Contingency item.
-4. Return ONLY a valid JSON object.`;
-
+/** Enhancement is best-effort: a failure returns the original prompt rather than blocking the render. */
+export async function enhancePrompt(userPrompt: string, styleKeywords: string): Promise<string> {
+  if (!userPrompt?.trim()) return userPrompt || "";
   try {
-    const response = await ai.models.generateContent({
-      model: "gemini-3.1-flash-lite",
-      contents: [{ role: "user", parts: [{ text: prompt }] }],
-      config: {
-        systemInstruction: `You are a Senior Quantity Surveyor from a top-tier Indian architectural firm. 
-Return ONLY a valid JSON object matching this structure:
-{
-  "items": [
-    { "material": "string", "category": "Material", "specification": "string", "quantity": "string", "unitPrice": 100, "total": 100 }
-  ],
-  "totalEstimate": "string (e.g. ₹45,00,000)",
-  "currency": "INR"
-}
-Categories: "Material", "Labor", or "Contingency". 
-Instructions:
-- Use Bengaluru market rates.
-- Include a 10% buffering in "Contingency".
-- Ensure the sum of totals matches totalEstimate.`,
-      }
+    const { prompt } = await postJSON<{ prompt: string }>("/api/enhance", {
+      prompt: userPrompt,
+      style: styleKeywords,
     });
-
-    const text = response.text?.trim() || "";
-    // Basic text cleaning in case of markdown blocks
-    const cleanText = text.replace(/```json\n?|\n?```/g, "").trim();
-    return JSON.parse(cleanText);
-  } catch (e) {
-    console.error("[AI] Cost estimation failed:", e);
-    throw new Error("Failed to generate cost breakdown. Please try again.");
+    return prompt || userPrompt;
+  } catch {
+    return userPrompt;
   }
 }
 
-/**
- * Generate a SINGLE architectural design image via our server.
- */
-export async function generateDesignImage(prompt: string, _size: "1K" | "2K" | "4K" = "1K", seed?: number): Promise<string> {
-  const useSeed = seed ?? Math.floor(Math.random() * 999999);
-  const res = await fetch('/api/generate-image', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ prompt, seed: useSeed })
-  });
+export type ImageSize = "1K" | "2K" | "4K";
 
-  if (!res.ok) {
-    const err = await res.json().catch(() => ({}));
-    throw new Error(err.error || res.statusText);
-  }
-
-  const data = await res.json();
-  return data.imageUrl;
+export async function generateDesignImage(
+  prompt: string,
+  size: ImageSize = "1K",
+  seed?: number,
+  signal?: AbortSignal,
+): Promise<string> {
+  const { imageUrl } = await postJSON<{ imageUrl: string }>(
+    "/api/generate-image",
+    { prompt, size, seed: seed ?? Math.floor(Math.random() * 999999) },
+    signal,
+  );
+  return imageUrl;
 }
 
+const VARIANT_STYLES = [
+  "natural daylight",
+  "cinematic lighting",
+  "twilight mood",
+  "highly detailed textures",
+];
+
 /**
- * Generate MULTIPLE design image variants in parallel.
+ * Generate N variants; succeeds as long as at least one lands.
+ *
+ * `onImage` fires as each variant completes so the grid can fill in
+ * progressively. Waiting for `Promise.allSettled` meant the user watched a
+ * spinner until the *slowest* variant returned — on the keyless fallback
+ * provider that can be a minute, even though the first render was ready in
+ * seconds.
  */
 export async function generateMultipleDesignImages(
   prompt: string,
-  count: number = 4,
-  _size: "1K" | "2K" | "4K" = "1K"
+  count = 4,
+  size: ImageSize = "1K",
+  signal?: AbortSignal,
+  onImage?: (url: string, index: number) => void,
 ): Promise<string[]> {
-  const seeds = Array.from({ length: count }, () => Math.floor(Math.random() * 999999));
-  const styles = ["natural daylight", "cinematic lighting", "twilight mood", "highly detailed textures"];
+  const images: string[] = [];
 
-  const imagePromises = Array.from({ length: count }, async (_, i) => {
-    try {
-      const variedPrompt = `${prompt}, ${styles[i % styles.length]}`;
-      return await generateDesignImage(variedPrompt, _size, seeds[i]);
-    } catch (e) {
-      console.warn(`[Image] Variant ${i} failed`, e);
-      return null;
-    }
-  });
+  // Requests are queued server-side (see withSlot in server.ts), where the
+  // provider's per-IP rate limit actually applies, so fan out freely here.
+  await Promise.allSettled(
+    Array.from({ length: count }, async (_, i) => {
+      const url = await generateDesignImage(
+        `${prompt}, ${VARIANT_STYLES[i % VARIANT_STYLES.length]}`,
+        size,
+        undefined,
+        signal,
+      );
+      images.push(url);
+      onImage?.(url, i);
+    }),
+  );
 
-  const results = await Promise.all(imagePromises);
-  const images = results.filter((img): img is string => img !== null);
-
-  if (images.length === 0) throw new Error("Failed to generate any images. The server might be overloaded. Please try again.");
-  return images;
-}
-
-/**
- * Enhance a prompt via AI.
- */
-export async function enhancePrompt(userPrompt: string, styleKeywords: string): Promise<string> {
-  if (!userPrompt?.trim()) return userPrompt || '';
-  try {
-    const response = await ai.models.generateContent({
-      model: "gemini-3.1-flash-lite",
-      contents: [{ role: "user", parts: [{ text: `User Wish: ${userPrompt}\nStyle: ${styleKeywords}` }] }],
-      config: {
-        systemInstruction: "You are a professional architectural prompt engineer. Enhance the user prompt with details about lighting, materials, and composition for a stunning visualization. Return ONLY the enhanced string.",
-      }
-    });
-
-    return response.text?.trim() || userPrompt;
-  } catch (error) {
-    console.warn("[AI] Prompt enhancement failed", error);
-    return userPrompt;
+  if (images.length === 0) {
+    throw new Error("Image synthesis failed for every variant. Please try again.");
   }
+  return images;
 }

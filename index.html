@@ -3,11 +3,62 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>My Google AI Studio App</title>
+    <meta name="theme-color" content="#050505" />
+    <meta name="color-scheme" content="dark" />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+
+    <title>Arch Agent — Autonomous Design &amp; Estimation</title>
+    <meta
+      name="description"
+      content="Arch Agent is a neural architecture orchestration center: agentic design conversations, photoreal visualization, immersive 3D and precision cost estimation."
+    />
+
+    <meta property="og:type" content="website" />
+    <meta property="og:title" content="Arch Agent — Autonomous Design &amp; Estimation" />
+    <meta
+      property="og:description"
+      content="Agentic architectural design, visualization and precision cost estimation."
+    />
+
+    <!-- Warm the connections the first paint depends on. -->
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link rel="preconnect" href="https://images.unsplash.com" />
+    <link rel="dns-prefetch" href="https://image.pollinations.ai" />
+
+    <!--
+      Fonts load without blocking first paint: fetch as a stylesheet the
+      parser ignores, then promote it once it arrives. `display=swap` means
+      text is readable in a fallback face immediately either way.
+    -->
+    <link
+      rel="stylesheet"
+      href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;700&display=swap"
+      media="print"
+      onload="this.media='all'"
+    />
+    <noscript>
+      <link
+        rel="stylesheet"
+        href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;700&display=swap"
+      />
+    </noscript>
+
+    <!--
+      Paint the page background before any CSS loads, so a slow stylesheet
+      never flashes white on a dark app.
+    -->
+    <style>
+      html,
+      body {
+        background: #050505;
+        margin: 0;
+      }
+    </style>
   </head>
   <body>
     <div id="root"></div>
+    <noscript>Arch Agent requires JavaScript to run.</noscript>
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>
-

@@ -4,5 +4,12 @@ dist/
 coverage/
 .DS_Store
 *.log
+
+# Secrets. `env.example` (no leading dot) is the committed template.
 .env*
 !.env.example
+
+# Local tooling
+.vite/
+.playwright-mcp/
+.claude/settings.local.json

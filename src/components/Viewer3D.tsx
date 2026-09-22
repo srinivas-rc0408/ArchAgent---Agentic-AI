@@ -1,36 +1,21 @@
-import React, { Suspense, useState, useRef, useEffect, useMemo } from 'react';
-import { Canvas, useLoader, useFrame } from '@react-three/fiber';
-import { 
-  OrbitControls, 
-  PerspectiveCamera, 
-  DeviceOrientationControls,
-  Environment,
-  useGLTF,
-  Stage,
-  Bounds,
-  ContactShadows,
-  Text,
-  Float
-} from '@react-three/drei';
-import { EffectComposer, Bloom, Noise, Vignette } from '@react-three/postprocessing';
+import React, { Suspense, useState, useRef, useEffect } from 'react';
+import { Canvas, useLoader, useFrame, useThree } from '@react-three/fiber';
+import { OrbitControls, Environment, useGLTF, Stage, ContactShadows } from '@react-three/drei';
+import { EffectComposer, Vignette } from '@react-three/postprocessing';
 import * as THREE from 'three';
 import { motion, AnimatePresence } from 'motion/react';
 import { LoadingBreadcrumb } from './ui/animated-loading-svg-text-shimmer';
 import { DesignConcept } from '../types';
-import { 
-  X, 
-  RotateCcw, 
-  ZoomIn, 
-  Info, 
-  Maximize, 
-  Minimize, 
-  ArrowUp, 
-  ArrowDown, 
-  Smartphone,
+import {
+  X,
+  RotateCcw,
+  ZoomIn,
+  Info,
+  Maximize,
+  Minimize,
   Sparkles,
   Box,
   Layers,
-  Cpu,
   Monitor,
   Eye,
   EyeOff,
@@ -39,7 +24,7 @@ import {
   Camera,
   MousePointer2,
   Maximize2,
-  Briefcase
+  Briefcase,
 } from 'lucide-react';
 
 interface Viewer3DProps {
@@ -58,6 +43,7 @@ interface Layer {
 
 const PanoramicRoom = ({ imageUrl }: { imageUrl: string }) => {
   const texture = useLoader(THREE.TextureLoader, imageUrl);
+  const gl = useThree((state) => state.gl);
   
   useEffect(() => {
     if (texture) {
@@ -66,7 +52,7 @@ const PanoramicRoom = ({ imageUrl }: { imageUrl: string }) => {
       texture.minFilter = THREE.LinearMipmapLinearFilter;
       texture.magFilter = THREE.LinearFilter;
       texture.generateMipmaps = true;
-      texture.anisotropy = 16;
+      texture.anisotropy = Math.min(8, gl.capabilities.getMaxAnisotropy());
       texture.needsUpdate = true;
     }
   }, [texture]);
@@ -74,7 +60,7 @@ const PanoramicRoom = ({ imageUrl }: { imageUrl: string }) => {
   return (
     <group>
       <mesh scale={[-1, 1, 1]} rotation={[0, -Math.PI / 2, 0]}>
-        <sphereGeometry args={[1000, 128, 128]} />
+        <sphereGeometry args={[500, 64, 64]} />
         <meshBasicMaterial 
           map={texture} 
           side={THREE.BackSide} 
@@ -195,27 +181,6 @@ const Viewer3D = function Viewer3DComponent({ design, onClose, is3D = false, mod
       prev.includes(id) ? prev.filter(l => l !== id) : [...prev, id]
     );
   };
-
-  // Status message rotation for realism
-  const [statusText, setStatusText] = useState("Synthesizing Point Cloud...");
-  const statusMessages = [
-    "Synthesizing Point Cloud...",
-    "Orchestrating Mesh Geometry...",
-    "Baking PBR Textures (8K)...",
-    "Optimizing Manifold Surfaces...",
-    "Applying Global Illumination Maps..."
-  ];
-
-  useEffect(() => {
-    if (is3D && !modelUrl) {
-      let i = 0;
-      const interval = setInterval(() => {
-        i = (i + 1) % statusMessages.length;
-        setStatusText(statusMessages[i]);
-      }, 2500);
-      return () => clearInterval(interval);
-    }
-  }, [is3D, modelUrl]);
 
   const toggleFullscreen = () => {
     if (!document.fullscreenElement) {
@@ -366,7 +331,7 @@ const Viewer3D = function Viewer3DComponent({ design, onClose, is3D = false, mod
         {is3D && (
           <div className="flex flex-col gap-2 p-2 bg-black/40 backdrop-blur-3xl border border-white/10 rounded-[2rem]">
             <div className="w-12 h-12 flex items-center justify-center text-white/20" title="Orbit Control">
-               <RotateCcw size={18} className="animate-spin-slow" />
+               <RotateCcw size={18} />
             </div>
             <div className="w-12 h-12 flex items-center justify-center text-white/20" title="Zoom Control">
                <ZoomIn size={18} />
@@ -537,14 +502,15 @@ const Viewer3D = function Viewer3DComponent({ design, onClose, is3D = false, mod
           )}
         </AnimatePresence>
 
-        <Canvas 
-          shadows
+        <Canvas
+          shadows={is3D}
+          dpr={[1, 1.75]}
           camera={{ position: [0, 0, 4], fov: 45 }}
-          gl={{ 
-            antialias: true, 
+          gl={{
+            antialias: true,
             powerPreference: "high-performance",
             toneMapping: THREE.ACESFilmicToneMapping,
-            toneMappingExposure: 1.0
+            toneMappingExposure: 1.0,
           }}
         >
           <Suspense fallback={<TechnicalGridPlaceholder />}>
@@ -562,7 +528,6 @@ const Viewer3D = function Viewer3DComponent({ design, onClose, is3D = false, mod
                     showGhost && <TechnicalGridPlaceholder />
                   )}
                 </Stage>
-                <Environment preset="city" />
                 <ContactShadows position={[0, -0.8, 0]} opacity={0.4} scale={10} blur={2.5} far={0.8} />
                 <OrbitControls 
                   ref={controlsRef}
@@ -574,12 +539,12 @@ const Viewer3D = function Viewer3DComponent({ design, onClose, is3D = false, mod
             ) : (
               <>
                 <PanoramicRoom imageUrl={design.url} />
-                <OrbitControls 
+                <OrbitControls
                   ref={controlsRef}
-                  enablePan={false} 
-                  enableZoom={true} 
-                  minDistance={0.01} 
-                  maxDistance={0.5} 
+                  enablePan={false}
+                  enableZoom={true}
+                  minDistance={0.1}
+                  maxDistance={1.5} 
                   rotateSpeed={-0.3} 
                   panSpeed={0.5}
                   zoomSpeed={0.6}
@@ -593,14 +558,8 @@ const Viewer3D = function Viewer3DComponent({ design, onClose, is3D = false, mod
               </>
             )}
             
-            <EffectComposer multisampling={8}>
-              <Bloom 
-                intensity={0.4} 
-                luminanceThreshold={1.2} 
-                luminanceSmoothing={0.1} 
-                mipmapBlur 
-              />
-              <Vignette eskil={false} offset={0.1} darkness={0.9} />
+            <EffectComposer multisampling={0} enableNormalPass={false}>
+              <Vignette eskil={false} offset={0.15} darkness={0.85} />
             </EffectComposer>
           </Suspense>
         </Canvas>

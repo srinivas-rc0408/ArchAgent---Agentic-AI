@@ -6,7 +6,8 @@ import { Input } from "@/components/ui/input";
 import { Loader2, ArrowLeft, ChevronLeft, Bot } from "lucide-react";
 import { AnimatedCharacters } from "@/components/ui/animated-characters-login-page";
 import { Logo } from "@/components/Logo";
-import { supabase } from "@/lib/supabase";
+import { supabase, isSupabaseConfigured } from "@/lib/supabase";
+import { setDemoSession } from "@/lib/useAuth";
 import { useLoading } from "@/lib/LoadingContext";
 
 interface LoginPageProps {
@@ -48,15 +49,17 @@ export default function LoginPage({ onLogin }: LoginPageProps) {
     setErrorMsg("");
     setIsLoading(true);
 
-    // DEV BYPASS for test accounts - skip Supabase sending OTP to avoid rate limits
-    if (identifier.trim() === "name@example.com" || identifier.trim() === "test@gmail.com") {
-      setTimeout(() => {
-        setIsLoading(false);
-        setStep("otp");
-      }, 500);
+    // Without Supabase credentials there is no identity provider to talk to,
+    // so sign in locally instead of failing. This path cannot be reached on a
+    // configured deployment.
+    if (!isSupabaseConfigured || !supabase) {
+      setDemoSession(true);
+      onLogin();
+      startSyncSequence(searchParams.get("redirect") || "/orchestration");
+      setIsLoading(false);
       return;
     }
-    
+
     try {
       const { error: otpError } = await supabase.auth.signInWithOtp({
         email: identifier.trim(),
@@ -72,7 +75,7 @@ export default function LoginPage({ onLogin }: LoginPageProps) {
         }
         
         if (otpError.message.toLowerCase().includes("rate limit")) {
-          throw new Error("Supabase Rate Limit Exceeded. Please wait a few minutes before trying again. For testing, you can use test@gmail.com with code 12345678.");
+          throw new Error("Too many sign-in attempts. Please wait a few minutes and try again.");
         }
         
         throw otpError;
@@ -94,15 +97,11 @@ export default function LoginPage({ onLogin }: LoginPageProps) {
     setErrorMsg("");
     setIsLoading(true);
 
-    // DEV BYPASS for test accounts
-    if ((identifier.trim() === "name@example.com" || identifier.trim() === "test@gmail.com") && otp === "12345678") {
-      localStorage.setItem("auth_token", "mock");
-      onLogin();
-      startSyncSequence(searchParams.get("redirect") || "/orchestration");
+    if (!supabase) {
       setIsLoading(false);
       return;
     }
-    
+
     try {
       const { data, error: verifyError } = await supabase.auth.verifyOtp({
         email: identifier.trim(),
@@ -113,7 +112,6 @@ export default function LoginPage({ onLogin }: LoginPageProps) {
       if (verifyError) throw verifyError;
 
       if (data.session) {
-        localStorage.setItem("auth_token", "true");
         onLogin();
         
         // Handle pending estimation redirection
@@ -264,7 +262,7 @@ export default function LoginPage({ onLogin }: LoginPageProps) {
                     className="space-y-4"
                   >
                     <div className="space-y-2">
-                      <label className="text-xs font-bold uppercase tracking-widest text-white/40 ml-1">Email or Mobile Number</label>
+                      <label className="text-xs font-bold uppercase tracking-widest text-white/40 ml-1">Work Email</label>
                       <Input
                         type="text"
                         placeholder="name@company.com"

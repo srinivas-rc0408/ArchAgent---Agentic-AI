@@ -1,14 +1,27 @@
-import { createClient } from '@supabase/supabase-js';
+import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 
-const hardcodedUrl = "https://pefzoadcadwvluqzlash.supabase.co";
-const hardcodedKey = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InBlZnpvYWRjYWR3dmx1cXpsYXNoIiwicm9sZSI6ImFub24iLCJpYXQiOjE3Nzc3NjU0MDgsImV4cCI6MjA5MzM0MTQwOH0.EMLVBGfIIieXyu1QHBMorADa8oq-vLX1NswaJYUTLr8";
+const url = import.meta.env.VITE_SUPABASE_URL;
+const anonKey = import.meta.env.VITE_SUPABASE_ANON_KEY;
 
-const envUrl = import.meta.env.VITE_SUPABASE_URL;
-const envKey = import.meta.env.VITE_SUPABASE_ANON_KEY;
+export const isSupabaseConfigured =
+  typeof url === "string" &&
+  url.startsWith("http") &&
+  typeof anonKey === "string" &&
+  anonKey.length > 40;
 
-const isValid = (val: any) => typeof val === 'string' && val.startsWith('http') && val.length > 20;
+/**
+ * `null` when credentials are absent, so the app runs fully offline on
+ * localStorage instead of throwing at import time. Every call site must
+ * null-check — see `useAuth` and OrchestrationPage's persistence layer.
+ */
+export const supabase: SupabaseClient | null = isSupabaseConfigured
+  ? createClient(url, anonKey, {
+      auth: { persistSession: true, autoRefreshToken: true, detectSessionInUrl: true },
+    })
+  : null;
 
-const supabaseUrl = isValid(envUrl) ? envUrl : hardcodedUrl;
-const supabaseAnonKey = (typeof envKey === 'string' && envKey.length > 50) ? envKey : hardcodedKey;
-
-export const supabase = createClient(supabaseUrl, supabaseAnonKey);
+if (!isSupabaseConfigured && import.meta.env.DEV) {
+  console.info(
+    "[Supabase] VITE_SUPABASE_URL / VITE_SUPABASE_ANON_KEY not set — running in local-only mode. See .env.example.",
+  );
+}

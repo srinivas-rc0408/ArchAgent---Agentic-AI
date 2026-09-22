@@ -1,12 +1,75 @@
-@import url('https://fonts.googleapis.com/css2?family=Montserrat:wght@400;500;600;700;800&family=Inter:wght@300;400;500;600&family=Geist+Mono:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600;700&display=swap');
 @import "tailwindcss";
 
-html, body {
+/*
+  Fonts are loaded from index.html with a preconnect + non-blocking <link>.
+  An `@import url(...)` here would serialise a second network round trip in
+  front of first paint: the browser must fetch this stylesheet, parse it,
+  then start the font request.
+
+  Montserrat was requested but never referenced by a single class, and
+  Geist Mono duplicated what JetBrains Mono already covers — both dropped.
+*/
+
+@theme {
+  --font-sans: "Inter", ui-sans-serif, system-ui, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, monospace;
+  --font-jetbrains-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, monospace;
+  --font-geist-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, monospace;
+}
+
+html,
+body {
   overflow-x: hidden;
   width: 100%;
+  background: #050505;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+html {
+  scrollbar-width: thin;
+  scrollbar-color: #333 transparent;
+}
+
+/* Lenis drives scrolling itself; leaving native smooth scroll on makes the
+   two interpolate against each other and the page feels rubbery. */
+html.lenis,
+html.lenis body {
+  height: auto;
+}
+.lenis.lenis-smooth {
+  scroll-behavior: auto !important;
+}
+
+::-webkit-scrollbar {
+  width: 4px;
+  height: 4px;
+}
+::-webkit-scrollbar-track,
+::-webkit-scrollbar-corner {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: #333;
+  border-radius: 4px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #555;
+}
+
+/* Keyboard focus stays visible; only the mouse-driven ring is suppressed. */
+:focus-visible {
+  outline: 2px solid rgba(255, 255, 255, 0.5);
+  outline-offset: 2px;
+}
+
+img {
+  content-visibility: auto;
 }
 
 @utility custom-scrollbar {
+  scrollbar-width: thin;
+  scrollbar-color: rgba(255, 255, 255, 0.15) transparent;
   &::-webkit-scrollbar {
     width: 4px;
   }
@@ -14,40 +77,6 @@ html, body {
     background: #27272a;
     border-radius: 10px;
   }
-}
-
-@theme {
-  --font-sans: "Inter", ui-sans-serif, system-ui, sans-serif;
-  --font-montserrat: "Montserrat", ui-sans-serif, system-ui, sans-serif;
-  --font-geist-mono: "Geist Mono", ui-monospace, SFMono-Regular, monospace;
-  --font-jetbrains-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, monospace;
-}
-
-::-webkit-scrollbar {
-  width: 4px;
-  height: 4px;
-}
-
-::-webkit-scrollbar-track {
-  background: transparent;
-}
-
-::-webkit-scrollbar-thumb {
-  background: #333333;
-  border-radius: 4px;
-}
-
-::-webkit-scrollbar-thumb:hover {
-  background: #555555;
-}
-
-::-webkit-scrollbar-corner {
-  background: transparent;
-}
-
-html {
-  scrollbar-width: thin;
-  scrollbar-color: #333333 transparent;
 }
 
 @utility hide-scrollbar {
@@ -61,21 +90,18 @@ html {
 @utility scrollbar-thin {
   scrollbar-width: thin;
   scrollbar-color: rgba(255, 255, 255, 0.2) transparent;
-  
+
   &::-webkit-scrollbar {
     width: 4px;
     height: 4px;
   }
-  
   &::-webkit-scrollbar-track {
     background: transparent;
   }
-  
   &::-webkit-scrollbar-thumb {
     background: rgba(255, 255, 255, 0.2);
     border-radius: 4px;
   }
-  
   &::-webkit-scrollbar-thumb:hover {
     background: rgba(255, 255, 255, 0.8);
   }
@@ -83,7 +109,20 @@ html {
 
 @utility bg-grid-white {
   background-size: 40px 40px;
-  background-image: 
+  background-image:
     linear-gradient(to right, rgba(255, 255, 255, 0.03) 1px, transparent 1px),
     linear-gradient(to bottom, rgba(255, 255, 255, 0.03) 1px, transparent 1px);
+}
+
+/* Respect the OS-level motion preference. Transforms and fades collapse to
+   near-instant rather than disappearing, so layout and focus order hold. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
 }

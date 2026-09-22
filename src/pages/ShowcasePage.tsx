@@ -1,5 +1,4 @@
-import { useState, useEffect } from "react";
-import { useNavigate } from "react-router-dom";
+import { useMemo, useState } from "react";
 import {
   ChevronLeft,
   DoorOpen,
@@ -9,7 +8,6 @@ import {
   Sparkles,
   Maximize,
   Bot,
-  Loader2,
   IndianRupee
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -18,6 +16,7 @@ import { cn } from "@/lib/utils";
 import { ImageLightbox } from "@/components/ImageLightbox";
 import { Logo } from "@/components/Logo";
 import { useLoading } from "@/lib/LoadingContext";
+import { useAuth } from "@/lib/useAuth";
 
 const TEMPLATE_DATA: Record<string, string[]> = {
   door: [
@@ -114,33 +113,33 @@ const TEMPLATE_CATEGORIES = [
 ];
 
 export default function ShowcasePage() {
-  const navigate = useNavigate();
   const [activeCategory, setActiveCategory] = useState("door");
   const [selectedImages, setSelectedImages] = useState<{
     images: { src: string; title: string }[];
     index: number;
   } | null>(null);
-  const { isSyncing, startSyncSequence } = useLoading();
+  const { startSyncSequence } = useLoading();
+  const { isAuthenticated } = useAuth();
   const [loadedImages, setLoadedImages] = useState<Record<string, boolean>>({});
 
   const handleBack = () => {
     startSyncSequence("/");
   };
 
-  const galleryImages = (TEMPLATE_DATA[activeCategory] || []).map((url, i) => ({
-    src: url,
-    id: `${activeCategory}-${i}`,
-    title: `${TEMPLATE_CATEGORIES.find((c) => c.id === activeCategory)?.name || "Design"} #${i + 1}`,
-  }));
-
-  const [isEstimating, setIsEstimating] = useState<string | null>(null);
+  const galleryImages = useMemo(() => {
+    const label = TEMPLATE_CATEGORIES.find((c) => c.id === activeCategory)?.name ?? "Design";
+    return (TEMPLATE_DATA[activeCategory] ?? []).map((url, i) => ({
+      src: url,
+      id: `${activeCategory}-${i}`,
+      title: `${label} #${i + 1}`,
+    }));
+  }, [activeCategory]);
 
   const handleEstimate = (e: React.MouseEvent, img: { src: string, title: string, id: string }) => {
     e.stopPropagation();
     
-    // Auth Guard Sequence
-    const token = localStorage.getItem("auth_token") || localStorage.getItem("sb-pbeclmupvofxghoxtisq-auth-token");
-    if (!token) {
+    // Auth guard
+    if (!isAuthenticated) {
       // Store intent and redirect
       localStorage.setItem("pending_estimation", JSON.stringify({
         prompt: img.title,
@@ -159,14 +158,6 @@ export default function ShowcasePage() {
       } 
     });
   };
-
-  useEffect(() => {
-    // Clear any lingering pending actions to prevent loops
-    const pendingEstimation = localStorage.getItem("pending_estimation");
-    if (pendingEstimation && localStorage.getItem("auth_token")) {
-       // Handled by LoginPage or initial mount
-    }
-  }, [navigate]);
 
   return (
     <motion.div
@@ -226,7 +217,7 @@ export default function ShowcasePage() {
               key={activeCategory + img.src + i}
               initial={{ opacity: 0, y: 15 }}
               animate={{ opacity: 1, y: 0 }}
-              transition={{ delay: i * 0.04, duration: 0.4, ease: "easeOut" }}
+              transition={{ delay: Math.min(i, 8) * 0.03, duration: 0.3, ease: "easeOut" }}
               className="group relative aspect-[3/4] rounded-2xl overflow-hidden cursor-pointer bg-black backdrop-blur-md border border-white/5 shadow-2xl will-change-transform transform-gpu"
               onClick={() =>
                 setSelectedImages({ images: galleryImages, index: i })
@@ -242,9 +233,9 @@ export default function ShowcasePage() {
               <img
                 src={img.src}
                 alt={img.title}
-                loading="eager"
+                loading={i < 4 ? "eager" : "lazy"}
+                fetchPriority={i < 4 ? "high" : "low"}
                 decoding="async"
-                style={{ imageRendering: "auto" }}
                 onLoad={() =>
                   setLoadedImages((prev) => ({ ...prev, [img.src]: true }))
                 }
@@ -265,11 +256,7 @@ export default function ShowcasePage() {
                   onClick={(e) => handleEstimate(e, img as any)}
                   className="bg-white/10 border-white/20 text-white hover:bg-white hover:text-black transition-all rounded-full px-6 flex items-center gap-2"
                 >
-                  {isEstimating === img.id ? (
-                    <Loader2 className="h-4 w-4 animate-spin" />
-                  ) : (
-                    <IndianRupee className="h-4 w-4" />
-                  )}
+                  <IndianRupee className="h-4 w-4" />
                   <span>Estimate Cost</span>
                 </Button>
                 <div 

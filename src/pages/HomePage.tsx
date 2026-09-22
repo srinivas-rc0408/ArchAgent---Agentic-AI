@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from "react";
+import { useState, useRef } from "react";
 import { useNavigate, Link, useOutletContext, useLocation } from "react-router-dom";
 import {
   Bot,
@@ -28,17 +28,15 @@ import { ImageLightbox } from "@/components/ImageLightbox";
 import { MenuToggleIcon } from "@/components/ui/menu-toggle-icon";
 import { Button } from "@/components/ui/button";
 import { FooterSection } from "@/components/ui/footer-section";
-import SupportChat from "@/components/SupportChat";
+import SupportChat, { type SupportChatRef } from "@/components/SupportChat";
 import ContactDialog from "@/components/ContactDialog";
 import { Logo } from "@/components/Logo";
 import { Progress } from "@/components/ui/interfaces-progress";
 import { RevealText } from "@/components/ui/reveal-text";
-import Lenis from "@studio-freight/lenis";
-import { StarButton } from "@/components/ui/star-button";
 import HoverAnimationButton from "@/components/ui/hover-animation-button";
 import { HoverBorderGradient } from "@/components/ui/hover-border-gradient";
 import { HoverButton } from "@/components/ui/hover-glow-button";
-import { supabase } from "@/lib/supabase";
+import { useAuth, signOut } from "@/lib/useAuth";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -66,42 +64,42 @@ const FEATURED_DESIGNS = [
     title: "Minimalist Glass Villa",
     location: "Zurich, Switzerland",
     image:
-      "https://images.unsplash.com/photo-1600585154340-be6161a56a0c?q=80&w=2070&auto=format&fit=crop",
+      "https://images.unsplash.com/photo-1600585154340-be6161a56a0c?q=70&w=1200&fm=webp&auto=format&fit=crop",
     category: "Architecture",
   },
   {
     title: "Luxury Penthouse",
     location: "Dubai, UAE",
     image:
-      "https://images.unsplash.com/photo-1600607687920-4e2a09cf159d?q=80&w=2070&auto=format&fit=crop",
+      "https://images.unsplash.com/photo-1600607687920-4e2a09cf159d?q=70&w=1200&fm=webp&auto=format&fit=crop",
     category: "Interior",
   },
   {
     title: "Modern Glass Residence",
     location: "Vancouver, Canada",
     image:
-      "https://images.unsplash.com/photo-1512917774080-9991f1c4c750?q=80&w=2070&auto=format&fit=crop",
+      "https://images.unsplash.com/photo-1512917774080-9991f1c4c750?q=70&w=1200&fm=webp&auto=format&fit=crop",
     category: "Architecture",
   },
   {
     title: "Brutalist Concrete Home",
     location: "Tokyo, Japan",
     image:
-      "https://images.unsplash.com/photo-1600566753376-12c8ab7fb75b?q=80&w=2070&auto=format&fit=crop",
+      "https://images.unsplash.com/photo-1600566753376-12c8ab7fb75b?q=70&w=1200&fm=webp&auto=format&fit=crop",
     category: "Architecture",
   },
   {
     title: "Zen Minimalist Suite",
     location: "Kyoto, Japan",
     image:
-      "https://images.unsplash.com/photo-1600210492486-724fe5c67fb0?q=80&w=2070&auto=format&fit=crop",
+      "https://images.unsplash.com/photo-1600210492486-724fe5c67fb0?q=70&w=1200&fm=webp&auto=format&fit=crop",
     category: "Interior",
   },
   {
     title: "Eco-Modern Forest Retreat",
     location: "Stockholm, Sweden",
     image:
-      "https://images.unsplash.com/photo-1600047509807-ba8f99d2cdde?q=80&w=2070&auto=format&fit=crop",
+      "https://images.unsplash.com/photo-1600047509807-ba8f99d2cdde?q=70&w=1200&fm=webp&auto=format&fit=crop",
     category: "Architecture",
   },
 ];
@@ -111,31 +109,12 @@ import { AccountModal } from "@/components/AccountModal";
 export default function HomePage() {
   const navigate = useNavigate();
   const location = useLocation();
-  const [isAuthenticated, setIsAuthenticated] = useState(() => {
-    const token = localStorage.getItem("auth_token");
-    return token === "true" || token === "mock";
-  });
+  const { user, isAuthenticated } = useAuth();
   const [isLoggingOut, setIsLoggingOut] = useState(false);
   const [logoutProgress, setLogoutProgress] = useState(0);
-  const { setBgImage } = useOutletContext<{
-    setBgImage: (img: string | ((prev: string) => string)) => void;
+  const { setBgIndex } = useOutletContext<{
+    setBgIndex: (i: number) => void;
   }>();
-
-  useEffect(() => {
-    const {
-      data: { subscription },
-    } = supabase.auth.onAuthStateChange((event, session) => {
-      setIsAuthenticated(!!session);
-      if (session) {
-        localStorage.setItem("auth_token", "true");
-      } else {
-        localStorage.removeItem("auth_token");
-      }
-    });
-    return () => {
-      subscription.unsubscribe();
-    };
-  }, []);
   const [isMenuOpen, setIsMenuOpen] = useState(false);
   const [isContactOpen, setIsContactOpen] = useState(false);
   const [selectedImage, setSelectedImage] = useState<{
@@ -146,76 +125,35 @@ export default function HomePage() {
   const [accountModalTab, setAccountModalTab] = useState<
     "profile" | "settings" | "about"
   >("profile");
-  const supportRef = useRef<{ openChat: (msg: string) => void }>(null);
+  const supportRef = useRef<SupportChatRef>(null);
   const { isSyncing, startSyncSequence } = useLoading();
 
-  useEffect(() => {
-    const lenis = new Lenis({
-      duration: 1.2,
-      easing: (t) => Math.min(1, 1.001 - Math.pow(2, -10 * t)),
-      orientation: "vertical",
-      gestureOrientation: "vertical",
-      smoothWheel: true,
-      wheelMultiplier: 1,
-      touchMultiplier: 2,
-      infinite: false,
-    });
-
-    let rafId: number;
-    function raf(time: number) {
-      lenis.raf(time);
-      rafId = requestAnimationFrame(raf);
-    }
-
-    rafId = requestAnimationFrame(raf);
-    return () => {
-      cancelAnimationFrame(rafId);
-      lenis.destroy();
-    };
-  }, []);
+  // Scroll smoothing lives in GlobalLayout — a second Lenis instance here made
+  // two rAF loops write scrollTop on the same frame, which is what made the
+  // homepage feel like it was fighting the wheel.
 
   const handleLogout = async () => {
     setIsMenuOpen(false);
     setIsLoggingOut(true);
     setLogoutProgress(0);
 
-    // Faster loading progress
-    let currentProgress = 0;
-    const interval = setInterval(() => {
-      currentProgress += Math.random() * 30;
-      if (currentProgress > 92) currentProgress = 92;
-      setLogoutProgress(currentProgress);
-    }, 60);
+    // Drive the bar off the real work instead of a timer race.
+    setLogoutProgress(35);
+    await signOut();
+    setLogoutProgress(100);
 
-    try {
-      await supabase.auth.signOut();
-    } catch (err) {
-      console.error("Sign out error:", err);
-    }
-    localStorage.removeItem("auth_token");
-
-    setTimeout(() => {
-      clearInterval(interval);
-      setLogoutProgress(100);
-
-      setTimeout(() => {
-        setIsLoggingOut(false);
-        setIsAuthenticated(false);
-        navigate("/");
-      }, 200);
-    }, 400);
+    window.setTimeout(() => {
+      setIsLoggingOut(false);
+      navigate("/");
+    }, 220);
   };
 
   const handleLaunchWorkspace = () => {
     if (isSyncing) return;
-    if (isAuthenticated) {
-      const randomImg =
-        ARCH_IMAGES[Math.floor(Math.random() * ARCH_IMAGES.length)];
-      setBgImage(randomImg);
-      startSyncSequence("/orchestration");
-    } else {
-      startSyncSequence("/login?redirect=/orchestration");
-    }
+    setBgIndex(Math.floor(Math.random() * ARCH_IMAGES.length));
+    startSyncSequence(
+      isAuthenticated ? "/orchestration" : "/login?redirect=/orchestration",
+    );
   };
 
   return (
@@ -709,7 +647,11 @@ export default function HomePage() {
                 <img
                   src={design.image}
                   alt={design.title}
-                  className="w-full h-full object-cover transition-transform duration-1000 group-hover:scale-105"
+                  loading="lazy"
+                  decoding="async"
+                  width={1200}
+                  height={750}
+                  className="w-full h-full object-cover transition-transform duration-700 group-hover:scale-105"
                   referrerPolicy="no-referrer"
                 />
                 <div className="absolute inset-0 bg-gradient-to-t from-black/90 via-black/20 to-transparent opacity-0 group-hover:opacity-100 transition-all duration-500 flex flex-col justify-end p-10">
@@ -809,7 +751,7 @@ export default function HomePage() {
         isOpen={accountModalOpen}
         onClose={() => setAccountModalOpen(false)}
         defaultTab={accountModalTab}
-        user={{ email: "srinivasrc0408@gmail.com", isPremium: true }}
+        user={{ email: user?.email ?? "guest@archagent.app", name: user?.displayName, isPremium: isAuthenticated }}
       />
       {selectedImage && (
         <ImageLightbox
